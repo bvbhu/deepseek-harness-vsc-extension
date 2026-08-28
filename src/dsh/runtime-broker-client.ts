@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, open, stat, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +131,18 @@ export async function acquireRuntimeBroker(options: {
           );
           broker.once("error", () => undefined);
           broker.unref();
+          // If this broker dies before we acquire a lease (e.g. the previous
+          // broker still held the Windows named pipe while it tore down), give
+          // our launch lock back so a later iteration can re-spawn instead of
+          // spinning to the deadline against a dead broker.
+          broker.once("exit", () => {
+            void releaseLaunchLockIfOurs(
+              options.paths.launchLock,
+              process.pid,
+            ).then((released) => {
+              if (released) ownsLaunchLock = false;
+            });
+          });
         }
       }
       await delay(100);
@@ -143,21 +155,68 @@ export async function acquireRuntimeBroker(options: {
 }
 
 async function tryTakeLaunchLock(path: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await open(path, "wx");
+      await handle.writeFile(
+        `${String(process.pid)}\n${new Date().toISOString()}\n`,
+      );
+      await handle.close();
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+      // A crashed launcher must not block every future VS Code window forever.
+      // Reap the lock when its recorded holder is dead, then retry the open
+      // once; otherwise leave it for its live owner.
+      if (!(await launchLockIsStale(path))) return false;
+      await unlink(path).catch(() => undefined);
+    }
+  }
+  return false;
+}
+
+/** True when the lock can be reaped: holder PID dead, or file gone/old-unreadable. */
+async function launchLockIsStale(path: string): Promise<boolean> {
+  const info = await stat(path).catch(() => null);
+  if (!info) return true; // vanished mid-check
+  // Hard floor for corrupt/unreadable locks: never block longer than this.
+  if (Date.now() - info.mtimeMs > 75_000) return true;
   try {
-    const handle = await open(path, "wx");
-    await handle.writeFile(
-      `${String(process.pid)}\n${new Date().toISOString()}\n`,
-    );
-    await handle.close();
+    const content = await readFile(path, "utf8");
+    const pid = Number.parseInt(content.split("\n")[0] ?? "", 10);
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+      return !isProcessAlive(pid);
+    }
+  } catch {
+    // unreadable: fall through to the mtime-only verdict (false).
+  }
+  return false;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
     return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "EEXIST") throw error;
-    // A crashed launcher must not block every future VS Code window forever.
-    const info = await stat(path).catch(() => null);
-    if (info && Date.now() - info.mtimeMs > 75_000)
-      await unlink(path).catch(() => undefined);
-    return false;
+    // EPERM: the process exists but we cannot signal it — still alive.
+    return code === "EPERM";
+  }
+}
+
+/** Remove the launch lock only when it still records our own PID. */
+async function releaseLaunchLockIfOurs(
+  path: string,
+  pid: number,
+): Promise<boolean> {
+  try {
+    const content = await readFile(path, "utf8");
+    if ((content.split("\n")[0] ?? "").trim() !== String(pid)) return false;
+    await unlink(path).catch(() => undefined);
+    return true;
+  } catch {
+    return false; // already gone or unreadable
   }
 }
 

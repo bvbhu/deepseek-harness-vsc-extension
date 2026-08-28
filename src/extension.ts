@@ -29,6 +29,9 @@ import {
 } from "./services/settings-service.ts";
 import { ChatViewProvider } from "./webview/chat-view.ts";
 
+/** The window's DshService, hoisted so deactivate() can await its stop. */
+let activeDsh: DshService | null = null;
+
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("DeepSeek Harness");
   const log = (line: string): void => output.appendLine(line);
@@ -53,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     onLog: (line) => log(line),
   });
+  activeDsh = dsh;
 
   const sessions = new SessionService(() => dsh.client);
   // M4b: todo 计划条投影 store（history 基线 seed + session/projection 帧，higher-seq-wins）。
@@ -324,6 +328,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       lastActiveFileKey = null;
       postActiveFile();
+      // Re-bind the window's session workspace to the (new) first folder root
+      // when folders are added/removed/reordered in a multi-root window.
+      void ensureWorkspaceForWindow();
     }),
   );
 
@@ -414,11 +421,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push({
     dispose: () => {
+      activeDsh = null;
       void dsh.stop();
     },
   });
 }
 
-export function deactivate(): void {
-  // dsh.stop() is owned by the activation subscription; nothing else to do.
+export function deactivate(): Promise<void> {
+  // Graceful shutdown: VS Code awaits a Thenable returned from deactivate, so
+  // the managed dsh child is stopped before the extension host exits. The
+  // Runtime Broker remains the cross-process backstop for crash/kill paths.
+  const dsh = activeDsh;
+  activeDsh = null;
+  return dsh ? dsh.stop() : Promise.resolve();
 }

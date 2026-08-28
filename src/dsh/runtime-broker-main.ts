@@ -41,6 +41,7 @@ let runtime: RuntimeState | null = null;
 let boot: Promise<RuntimeState> | null = null;
 let shuttingDown = false;
 let shutdownTimer: NodeJS.Timeout | null = null;
+let listening = false;
 const leases = new Set<Socket>();
 
 const ipc = createServer((socket) => {
@@ -65,7 +66,18 @@ const ipc = createServer((socket) => {
   });
 });
 
-ipc.on("error", () => process.exit(1));
+ipc.on("error", (error: Error) => {
+  // A previous Broker may still hold the Windows named pipe while it tears
+  // down (its dsh stop takes up to ~5s). Retry the bind for a short grace
+  // instead of exiting immediately; otherwise the client must re-spawn us and
+  // the new process would hit the same conflict.
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EADDRINUSE" && !shuttingDown) {
+    retryListen();
+    return;
+  }
+  process.exit(1);
+});
 
 void startIpc();
 
@@ -76,13 +88,33 @@ process.on("SIGINT", () => {
   void shutdown();
 });
 
+/** Bind retry budget: ~10s, covering a prior Broker's dsh-stop grace period. */
+const LISTEN_RETRY_MS = 250;
+const LISTEN_RETRY_MAX = 40;
+let listenRetries = 0;
+
 async function startIpc(): Promise<void> {
   if (process.platform !== "win32")
     await unlink(socketPath).catch(() => undefined);
+  listen();
+}
+
+function listen(): void {
+  if (shuttingDown) return;
   ipc.listen(socketPath, () => {
+    listening = true;
     if (process.platform !== "win32")
       void chmod(socketPath, 0o600).catch(() => undefined);
   });
+}
+
+function retryListen(): void {
+  if (shuttingDown) return;
+  listenRetries += 1;
+  if (listenRetries >= LISTEN_RETRY_MAX) process.exit(1);
+  setTimeout(() => {
+    if (!listening) listen();
+  }, LISTEN_RETRY_MS);
 }
 
 function requiredArgument(value: string | undefined): string {
@@ -92,6 +124,16 @@ function requiredArgument(value: string | undefined): string {
 }
 
 async function handleAcquire(socket: Socket, raw: string): Promise<void> {
+  if (shuttingDown) {
+    send(socket, {
+      protocol: BROKER_PROTOCOL_VERSION,
+      type: "error",
+      code: "configuration",
+      message: "Runtime Broker 正在关闭",
+    });
+    socket.end();
+    return;
+  }
   let request: BrokerAcquireRequest;
   try {
     request = JSON.parse(raw) as BrokerAcquireRequest;
@@ -260,13 +302,16 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   if (shutdownTimer) clearTimeout(shutdownTimer);
+  // Refuse new leases first: closing the listener before tearing down dsh
+  // means a late acquire can never re-boot a child mid-shutdown (it will
+  // instead spawn a fresh Broker). Then drop any open lease sockets.
+  if (ipc.listening) ipc.close(() => undefined);
   for (const lease of leases) lease.destroy();
   leases.clear();
   const current = runtime;
   runtime = null;
   if (current?.server) await current.server.stop().catch(() => undefined);
   await unlink(metadataPath).catch(() => undefined);
-  await new Promise<void>((resolve) => ipc.close(() => resolve()));
   if (process.platform !== "win32")
     await unlink(socketPath).catch(() => undefined);
   process.exit(0);

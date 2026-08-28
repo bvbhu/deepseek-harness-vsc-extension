@@ -6,18 +6,45 @@ AGENTS.md
 .idea
 .vscode/settings.json
 
+# ── local dev scratch dirs ──────────────────────────────────────────
 deepseek-harness
 dsh-src
 cline
 
+# ── dependency stores ──────────────────────────────────────────────
 node_modules/
 .pnpm-store/
 .corepack/
 .npmrc
 
-docs/
+# ── build outputs ─────────────────────────────────────────────────
 dist/
 out/
 *.vsix
 *.log
+*.tgz
+*.zip
 .scratch
+
+# ── local build/deploy scripts (not committed) ────────────────────
+build-deploy.bat
+scripts/build-and-deploy.mjs
+
+# ── test / coverage reports ────────────────────────────────────────
+coverage/
+
+# ── environment files (may contain secrets) ───────────────────────
+.env
+.env.*
+.env.*.local
+!.env.example
+
+# ── editor / OS metadata ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── docs (local notes, not shipped) ────────────────────────────────
+docs/

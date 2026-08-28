@@ -233,10 +233,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           message.sessionId,
           message.navigationId,
         );
-        await this.refreshAgentPresets(
-          message.sessionId,
-          message.navigationId,
-        );
+        await this.refreshAgentPresets(message.sessionId, message.navigationId);
         break;
       case "atOpen":
         await this.serveAtCandidates(message.sessionId, message.requestId);
@@ -304,10 +301,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
         break;
       case "agentPresetOpen":
-        await this.refreshAgentPresets(
-          message.sessionId,
-          message.requestId,
-        );
+        await this.refreshAgentPresets(message.sessionId, message.requestId);
         break;
       case "agentPresetSelect":
         await this.serveAgentPresetSelect(
@@ -596,10 +590,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private postAgentPresetState(
-    sessionId: string | null,
-    requestId = 0,
-  ): void {
+  private postAgentPresetState(sessionId: string | null, requestId = 0): void {
     this.post({
       type: "agentPresets",
       sessionId,
@@ -641,11 +632,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         summary = this.lastSessionItems.get(sourceSessionId);
       }
       if (summary === undefined) {
-        this.agentPresets.fail(
-          sourceSessionId,
-          "无法确认当前会话状态",
-          true,
-        );
+        this.agentPresets.fail(sourceSessionId, "无法确认当前会话状态", true);
         return;
       }
       if (!summary.blank) {
@@ -831,7 +818,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.refreshAgentPresets(this._selectedSessionId);
     // 面板数据：ready（供「无可用 Provider」引导页派生）或终态（error/stopped，供「关于」gate）
     // 都推送；webview 重载/首载时据此重水合。
-    if (facts.status === "ready" || facts.status === "error" || facts.status === "stopped")
+    if (
+      facts.status === "ready" ||
+      facts.status === "error" ||
+      facts.status === "stopped"
+    )
       await this.refreshSettings();
     const sessionId = this._selectedSessionId;
     if (!sessionId) return;
@@ -1425,16 +1416,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** M4: host/agent-error → 对话流注记（选中会话时立即推送快照）。 */
-  pushAgentError(sessionId: string, message: string): void {
-    this.conversations.applyAgentError(sessionId, message);
+  /** M4: host/agent-error：只更新会话列表失败角标，不再向对话流追加注记 */
+  pushAgentError(sessionId: string): void {
     const current = this.activities.get(sessionId);
     this.updateActivity(sessionId, {
       failedSeq: (current?.failedSeq ?? -1) + 1,
     });
-    if (sessionId !== this.selectedSessionId) return;
-    const snapshot = this.conversations.snapshot(sessionId);
-    if (snapshot) this.post({ type: "conversation", sessionId, snapshot });
   }
 
   /** Consume one mux frame into the lightweight Workspace activity index. */

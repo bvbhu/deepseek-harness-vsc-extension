@@ -256,23 +256,6 @@ describe("ConversationService history pagination", () => {
     expect(onChange).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps agent-error notes alongside the pagination flag", async () => {
-    const { client } = fakeClient(async () =>
-      page(userEvents([1]), true),
-    );
-    const service = new ConversationService(() => client);
-    await service.attach("s1");
-    service.applyAgentError("s1", "boom");
-
-    const snapshot = service.snapshot("s1")!;
-
-    expect(snapshot.hasMore).toBe(true);
-    expect(snapshot.items.at(-1)).toEqual({
-      kind: "note",
-      text: "会话出错：boom",
-    });
-  });
-
   it("snapshot returns null before attach", () => {
     const { client } = fakeClient(async () => page([], false));
     const service = new ConversationService(() => client);

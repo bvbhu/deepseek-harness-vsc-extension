@@ -1,6 +1,26 @@
 # DeepSeek Harness VSCode Extension
 
 > [!NOTE]
+> ### About This Fork
+>
+> This repository is a personally maintained Fork of [DeepSeek Harness VSCode Extension](https://github.com/weinibuliu/deepseek-harness-vsc-extension), primarily aiming to fix issues encountered during personal use.
+>
+> 本仓库是 [DeepSeek Harness VSCode Extension](https://github.com/weinibuliu/deepseek-harness-vsc-extension) 的个人维护 Fork，主要目标是修复个人使用中遇到的问题。
+>
+> **Important:** The original Visual Studio Marketplace listing is no longer available. Please download the latest build from the **GitHub Actions** page. 
+>
+> **重要提示：** 原 Visual Studio Marketplace 已不可用，可以从 **GitHub Actions** 页面下载最新构建。
+>
+> For manual local build, refer to the [Development](#development) section.
+>
+> 本地构建请参考 [Development](#development) 章节。
+
+> [!NOTE]
+> The content below is derived from the original repository README.
+>
+> 以下内容为原仓库 README。
+
+> [!NOTE]
 > This is a **COMMUNITY** project. There may be some issues, and we are trying to make it better.
 >
 > 这是一个**社区**项目，它可能存在一些问题，而我们正在努力让它变得足够好用。

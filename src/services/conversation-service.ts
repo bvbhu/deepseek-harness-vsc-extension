@@ -8,9 +8,11 @@
  * re-attaches every tracked session after a mux reconnect, mirroring the
  * reference client's reconnect = reopen stream + refetch history.
  *
- * M4: host/agent-error (no turn position) folds into a per-session note at
- * the snapshot layer — the fold stays a pure session-event fold, host frames
- * never enter it; the note is appended to the folded items.
+ * host/agent-error (M4) is intentionally NOT folded into the conversation
+ * surface: the two-level fix (session-note append + sticky cache) made error
+ * records pile up at the flow bottom (issue #10), so they are removed from
+ * the snapshot entirely — the entry point logs them and only the session-list
+ * failure badge survives.
  *
  * M4b: the history-tail page's `projections` block (when the deployment
  * mounts a projection registry) is forwarded through the optional
@@ -33,10 +35,7 @@ import {
   type WireSessionEvent,
 } from "../conversation/fold.ts";
 import type { WireClient, ServerRequest } from "../dsh/wire.ts";
-import type {
-  ConversationItem,
-  ConversationSnapshot,
-} from "../shared/protocol.ts";
+import type { ConversationSnapshot } from "../shared/protocol.ts";
 import type { ProjectionsBlock } from "./projection-service.ts";
 
 /** One session.history page entry (structural; view is unused in v1). */
@@ -111,8 +110,6 @@ export class ConversationService extends EventEmitter {
   private readonly tracked = new Map<string, TrackedSession>();
   /** Frames buffered while a fetch is mid-flight (drained seq-deduped). */
   private readonly pending = new Map<string, WireSessionEvent[]>();
-  /** M4: per-session host/agent-error notes (no turn position; appended at snapshot layer). */
-  private readonly agentErrors = new Map<string, string[]>();
   /** M4b: optional projections-block sink (seeded from the history tail page). */
   private readonly onProjections?: (
     sessionId: string,
@@ -131,18 +128,10 @@ export class ConversationService extends EventEmitter {
   snapshot(sessionId: string): ConversationSnapshot | null {
     const tracked = this.tracked.get(sessionId);
     if (!tracked) return null;
-    return this.withAgentErrorNotes(sessionId, {
+    return {
       ...tracked.fold.snapshot(),
       hasMore: tracked.hasMore,
-    });
-  }
-
-  /** M4: host/agent-error → per-session note (session-level failure visible in context). */
-  applyAgentError(sessionId: string, message: string): void {
-    const notes = this.agentErrors.get(sessionId) ?? [];
-    notes.push(message);
-    this.agentErrors.set(sessionId, notes);
-    this.emit("change", sessionId);
+    };
   }
 
   /**
@@ -271,18 +260,5 @@ export class ConversationService extends EventEmitter {
     const client = this.wire();
     if (!client) throw new Error("dsh web 尚未就绪");
     return client;
-  }
-
-  /** Append cached agent-error notes to a folded snapshot (fold stays pure). */
-  private withAgentErrorNotes(
-    sessionId: string,
-    snapshot: ConversationSnapshot,
-  ): ConversationSnapshot {
-    const notes = this.agentErrors.get(sessionId);
-    if (!notes || notes.length === 0) return snapshot;
-    const items: ConversationItem[] = [...snapshot.items];
-    for (const message of notes)
-      items.push({ kind: "note", text: `会话出错：${message}` });
-    return { ...snapshot, items };
   }
 }

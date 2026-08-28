@@ -125,8 +125,8 @@ export default function App() {
   const navigationSeq = useRef(0)
   const latestApplied = useRef(new Map<string, number>())
   const replyResolvers = useRef(new Map<number, (reply: SettingsReply) => void>())
-  // 权限席位切换的 requestId 集合：这些 `/permission <preset>` 执行在结算时不
-  // 递增 commitSeq（不消费草稿）。结算（accepted/failed）时取走，杜绝泄漏。
+  // 保留草稿的 requestId 集合：权限席位切换与模型切换在结算时都不递增 commitSeq
+  // （不消费草稿、不清空输入框）。结算（accepted/failed）时取走，杜绝泄漏。
   const keepDraftRequestIds = useRef(new Set<number>())
 
   useEffect(() => {
@@ -214,7 +214,7 @@ export default function App() {
         }
         case 'composerOperation': {
           const key = composerKey(message.sourceSessionId)
-          // 权限席位切换：选中即提交，但保留草稿（不递增 commitSeq 清空输入框）。
+          // 权限席位 / 模型切换：选中即提交，但保留草稿（不递增 commitSeq 清空输入框）。
           const keepDraft = keepDraftRequestIds.current.delete(message.requestId)
           setOperationsBySession((prev) => {
             if (prev[key]?.requestId !== message.requestId) return prev
@@ -517,6 +517,8 @@ export default function App() {
     const key = composerKey(sessionId)
     const requestId = ++requestSeq.current
     setOperationsBySession((prev) => ({ ...prev, [key]: { requestId, kind: 'model' } }))
+    // 模型切换：选中即提交，但保留草稿（不递增 commitSeq 清空输入框）。
+    keepDraftRequestIds.current.add(requestId)
     post({
       type: 'modelSelect', sessionId, requestId, provider, model,
       ...(effort === undefined ? {} : { effort }),

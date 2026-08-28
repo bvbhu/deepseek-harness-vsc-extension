@@ -219,11 +219,12 @@ export function activate(context: vscode.ExtensionContext): void {
     ) {
       void provider.refreshSessions();
     }
-    // M4: 无 turn 位置的 agent 失败 → 对话流注记节点。
+    // M4: host/agent-error：无 turn 位置的 agent 失败 →  会话列表失败角标
+    // （不再向对话流底部追加“会话出错”信息）。
     if (frame.method === "host/agent-error") {
       const payload = frame.payload as { sessionId?: string; message?: string };
       if (payload.sessionId && payload.message)
-        provider.pushAgentError(payload.sessionId, payload.message);
+        provider.pushAgentError(payload.sessionId);
     }
     // M4: host 流级错误 → 日志 + 状态栏。
     const hpayload = frame.payload as {

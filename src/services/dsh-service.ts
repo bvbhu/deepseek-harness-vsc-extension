@@ -52,6 +52,15 @@ interface ResolvedTarget {
   reportedVersion: string;
 }
 
+/** Delay between WebSocket reconnect attempts before escalating to a restart. */
+const RECONNECT_INTERVAL_MS = 1_000;
+/** Consecutive reconnect failures before the service is restarted. */
+const RECONNECT_BEFORE_RESTART = 3;
+/** Backoff between service restart attempts after a failed restart. */
+const RESTART_BACKOFF_MS = 5_000;
+/** Max automatic restart attempts before surfacing a terminal error. */
+const RESTART_MAX_ATTEMPTS = 10;
+
 export class DshService extends EventEmitter {
   private readonly options: DshServiceOptions;
   private launcher: DshLauncher | null = null;
@@ -68,6 +77,9 @@ export class DshService extends EventEmitter {
   private status: DshStatus = "stopped";
   private generation = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectFailures = 0;
+  private restarting = false;
+  private restartAttempts = 0;
   private explicitPath: string | null | undefined;
 
   constructor(options: DshServiceOptions) {
@@ -330,19 +342,69 @@ export class DshService extends EventEmitter {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopping || this.reconnectTimer) return;
+    if (this.stopping || this.restarting || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.openGeneration().then(
-        () => this.setStatus("ready"),
+        () => {
+          this.reconnectFailures = 0;
+          this.setStatus("ready");
+        },
         (error: unknown) => {
           this.options.onLog?.(
             `dsh 重连失败: ${error instanceof Error ? error.message : String(error)}`,
           );
-          this.scheduleReconnect();
+          this.reconnectFailures += 1;
+          // Repeated WebSocket reconnect failures imply the managed dsh child
+          // (or its Broker) is gone. Escalate to a full service restart —
+          // resolveTarget re-acquires/re-spawns the Broker and dsh — instead
+          // of looping forever on a dead endpoint.
+          if (this.reconnectFailures >= RECONNECT_BEFORE_RESTART) {
+            void this.restartService();
+          } else {
+            this.scheduleReconnect();
+          }
         },
       );
-    }, 1_000);
+    }, RECONNECT_INTERVAL_MS);
+  }
+
+  /** Re-acquire (or re-spawn) the dsh target after reconnects stop working. */
+  private async restartService(): Promise<void> {
+    if (this.stopping || this.restarting) return;
+    this.restarting = true;
+    this.reconnectFailures = 0;
+    this.restartAttempts += 1;
+    if (this.restartAttempts > RESTART_MAX_ATTEMPTS) {
+      this.restarting = false;
+      this.restartAttempts = 0;
+      this.setStatus(
+        "error",
+        "dsh 服务多次重启失败，请检查 dsh 可执行文件/端口后手动重试",
+      );
+      return;
+    }
+    this.options.onLog?.(
+      `dsh 连接持续失败，尝试重启服务以恢复 (第 ${String(this.restartAttempts)} 次)`,
+    );
+    try {
+      // restart() = stop() (release the lease/transport) + start() (resolve
+      // the target again, re-acquiring or re-spawning the Broker and dsh).
+      // A successful start() re-arms the ready status, which re-binds the
+      // workspace via the extension's status listener.
+      await this.restart();
+      this.restartAttempts = 0;
+    } catch (error) {
+      this.options.onLog?.(
+        `dsh 服务重启失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        void this.restartService();
+      }, RESTART_BACKOFF_MS);
+    } finally {
+      this.restarting = false;
+    }
   }
 
   private closeTransport(): void {

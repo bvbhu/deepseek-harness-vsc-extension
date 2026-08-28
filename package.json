@@ -3,10 +3,15 @@
   "displayName": "DeepSeek Harness",
   "description": "DeepSeek Harness(dsh) for VS Code",
   "version": "0.1.13",
-  "publisher": "weinibuliu",
+  "publisher": "bvbhu",
+  "contributors": [
+    { "name": "不留", "github": "weinibuliu" },
+    { "name": "Eason Jiang", "github": "Eason-JiangYZ" },
+    { "name": "ZiNan Ou", "github": "No8ah" }
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/weinibuliu/deepseek-harness-vsc-extension"
+    "url": "https://github.com/bvbhu/deepseek-harness-vsc-extension"
   },
   "license": "MIT",
   "engines": {

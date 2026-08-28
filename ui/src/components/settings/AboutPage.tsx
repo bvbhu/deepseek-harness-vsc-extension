@@ -12,7 +12,7 @@ import type { SettingsPanelView } from '../../../../src/shared/protocol.ts'
 import { statusCopy } from '../../statusCopy.ts'
 import type { SettingsWire } from './wire.ts'
 
-const REPO_URL = 'https://github.com/weinibuliu/deepseek-harness-vsc-extension'
+const REPO_URL = 'https://github.com/bvbhu/deepseek-harness-vsc-extension'
 
 const SOURCE_LABEL: Record<string, string> = {
   config: '配置',

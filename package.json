@@ -2,7 +2,7 @@
   "name": "dsh-vsc",
   "displayName": "DeepSeek Harness",
   "description": "DeepSeek Harness(dsh) for VS Code",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "publisher": "bvbhu",
   "contributors": [
     { "name": "不留", "github": "weinibuliu" },

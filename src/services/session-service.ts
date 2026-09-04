@@ -1,10 +1,16 @@
 /**
  * SessionService: workspace/session orchestration over the wire client
  * (D5, §6). Window ↔ Workspace is 1:1 on the folder root: ensureWorkspace
- * resolves the root via workspace.list (canonical path match) or creates it.
- * Session lists render the current Workspace's accounted sessions.
+ * resolves the root via workspace/follow baseline (canonical path match) or
+ * creates it. Session lists render the current Workspace's accounted sessions.
+ *
+ * 0.1.2 wire 契约：`session/*` 的参数对象包在 `request` 里（`session/list`
+ * 例外，包在 `_request` 里，参数可省略）；`workspace/*` 同样包 `request`，
+ * 而 `workspace.list` 整个方法已删除，由 `workspace/follow` 流的 baseline 帧
+ * 替代（wire.ts `workspaceList()`）。
  */
 
+import { randomUUID } from "node:crypto";
 import { DshRpcError, type WireClient } from "../dsh/wire.ts";
 import type { SessionSummary, WorkspaceView } from "../shared/protocol.ts";
 import { canonicalPath } from "./path-util.ts";
@@ -19,7 +25,7 @@ export interface PromptResult {
 
 export class SessionService {
   private workspace: WorkspaceView | null = null;
-  /** Registry-global archive set (Host order), cached from workspace.list / host frames. */
+  /** Registry-global archive set (Host order), cached from workspace/follow / host frames. */
   private archivedSessionIds: string[] = [];
 
   /**
@@ -43,14 +49,22 @@ export class SessionService {
     return client;
   }
 
+  /** The workspace registry baseline + archive set from workspace/follow. */
+  private async workspaces(): Promise<{
+    items: WorkspaceView[];
+    archivedSessionIds: string[];
+  }> {
+    const list = await this.requireClient().workspaceList();
+    return {
+      items: list.items as WorkspaceView[],
+      archivedSessionIds: list.archivedSessionIds,
+    };
+  }
+
   /** Resolve (or create) the Workspace for a folder root; caches the result. */
   async ensureWorkspace(folderRoot: string): Promise<WorkspaceView> {
     if (this.workspace) return this.workspace;
-    const client = this.requireClient();
-    const list = await client.call<{
-      items: WorkspaceView[];
-      archivedSessionIds: string[];
-    }>("workspace.list", {});
+    const list = await this.workspaces();
     this.archivedSessionIds = list.archivedSessionIds;
     const canonical = canonicalPath(folderRoot);
     const existing = list.items.find(
@@ -60,12 +74,10 @@ export class SessionService {
       this.workspace = existing;
       return existing;
     }
-    const created = await client.call<{
+    const created = await this.requireClient().call<{
       workspace: WorkspaceView;
       created: boolean;
-    }>("workspace.create", {
-      path: folderRoot,
-    });
+    }>("workspace/create", { request: { path: folderRoot } });
     this.workspace = created.workspace;
     return created.workspace;
   }
@@ -87,13 +99,7 @@ export class SessionService {
   ): Promise<SessionSummary[]> {
     const workspace = this.workspace;
     if (!workspace) return [];
-    const client = this.requireClient();
-    // Re-sync the workspace view: session.create attaches after publication,
-    // so the cached sessionIds are stale until the next list.
-    const { items: workspaces, archivedSessionIds } = await client.call<{
-      items: WorkspaceView[];
-      archivedSessionIds: string[];
-    }>("workspace.list", {});
+    const { items: workspaces, archivedSessionIds } = await this.workspaces();
     const fresh =
       workspaces.find((w) => w.workspaceId === workspace.workspaceId) ??
       workspace;
@@ -101,10 +107,9 @@ export class SessionService {
     this.archivedSessionIds = archivedSessionIds;
     const accounted = new Set(fresh.sessionIds);
     const archived = new Set(archivedSessionIds);
-    const { items } = await client.call<{ items: SessionSummary[] }>(
-      "session.list",
-      {},
-    );
+    const { items } = await this.requireClient().call<{
+      items: SessionSummary[];
+    }>("session/list", { _request: {} });
     return items
       .filter((item) => accounted.has(item.sessionId))
       .filter((item) => item.origin !== "subagent")
@@ -125,20 +130,15 @@ export class SessionService {
   ): Promise<{ sessionId: string }> {
     const workspace = this.workspace;
     if (!workspace) throw new Error("尚未关联 Workspace，无法创建会话");
-    const client = this.requireClient();
-    const { items: workspaces, archivedSessionIds } = await client.call<{
-      items: WorkspaceView[];
-      archivedSessionIds: string[];
-    }>("workspace.list", {});
+    const { items: workspaces, archivedSessionIds } = await this.workspaces();
     const fresh =
       workspaces.find((w) => w.workspaceId === workspace.workspaceId) ??
       workspace;
     this.workspace = fresh;
     this.archivedSessionIds = archivedSessionIds;
-    const { items } = await client.call<{ items: SessionSummary[] }>(
-      "session.list",
-      {},
-    );
+    const { items } = await this.requireClient().call<{
+      items: SessionSummary[];
+    }>("session/list", { _request: {} });
     const archived = new Set(archivedSessionIds);
     const occupied = new Set(occupiedBlankSessionIds);
     for (const item of items) {
@@ -152,9 +152,10 @@ export class SessionService {
         return { sessionId: item.sessionId };
       }
     }
-    return await client.call<{ sessionId: string }>("session.create", {
-      workspaceId: fresh.workspaceId,
-    });
+    return await this.requireClient().call<{ sessionId: string }>(
+      "session/create",
+      { request: { workspaceId: fresh.workspaceId } },
+    );
   }
 
   /** Archive a session into the registry-global set; returns the full updated set. */
@@ -162,7 +163,7 @@ export class SessionService {
     const client = this.requireClient();
     const { archivedSessionIds } = await client.call<{
       archivedSessionIds: string[];
-    }>("workspace.archiveSession", { sessionId });
+    }>("workspace/archiveSession", { request: { sessionId } });
     this.archivedSessionIds = archivedSessionIds;
     return archivedSessionIds;
   }
@@ -171,8 +172,8 @@ export class SessionService {
   async renameSession(sessionId: string, title: string): Promise<string> {
     const client = this.requireClient();
     const result = await client.call<{ title: string; seq: number }>(
-      "session.rename",
-      { sessionId, title },
+      "session/rename",
+      { request: { sessionId, title } },
     );
     return result.title;
   }
@@ -193,11 +194,14 @@ export class SessionService {
   ): Promise<PromptResult> {
     const client = this.requireClient();
     return await client.call<PromptResult>(
-      "session.prompt",
+      "session/prompt",
       {
-        sessionId,
-        mode,
-        content: [{ type: "text", text }],
+        request: {
+          requestId: randomUUID(),
+          sessionId,
+          mode,
+          content: [{ type: "text", text }],
+        },
       },
       signal,
     );
@@ -211,8 +215,8 @@ export class SessionService {
     if (!sessionId) return null;
     const client = this.requireClient();
     const { items } = await client.call<{ items: SessionSummary[] }>(
-      "session.list",
-      {},
+      "session/list",
+      { _request: {} },
     );
     return items.find((item) => item.sessionId === sessionId)?.cwd ?? null;
   }
@@ -221,7 +225,9 @@ export class SessionService {
   async cancel(sessionId: string): Promise<void> {
     const client = this.requireClient();
     try {
-      await client.call<{ accepted: true }>("session.cancel", { sessionId });
+      await client.call<{ accepted: true }>("session/cancel", {
+        request: { sessionId },
+      });
     } catch (error) {
       // Cancel is idempotent from the UI's perspective. If no live agent is
       // attached, the requested postcondition (not running) already holds.

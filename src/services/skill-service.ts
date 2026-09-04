@@ -51,7 +51,9 @@ export class SkillService {
     if (this.available !== null) return this.available;
     const client = this.requireClient();
     try {
-      await client.call<unknown>("skill.list", { sessionId });
+      await client.call<unknown>("skills/list", {
+        request: { sessionId },
+      });
       this.available = true;
     } catch (error) {
       this.available = error instanceof DshRpcError;
@@ -83,8 +85,8 @@ export class SkillService {
     const client = this.requireClient();
     let raw: { skills: RawSkillEntry[] };
     try {
-      raw = await client.call<{ skills: RawSkillEntry[] }>("skill.list", {
-        sessionId,
+      raw = await client.call<{ skills: RawSkillEntry[] }>("skills/list", {
+        request: { sessionId },
       });
     } catch (error) {
       // Persisted sessions are visible to session.list/history before the

@@ -10,13 +10,15 @@ AGENTS.md
 deepseek-harness
 dsh-src
 cline
+.review_diff.txt
 
 # ── dependency stores ──────────────────────────────────────────────
 node_modules/
 .pnpm-store/
 .corepack/
 .npmrc
-
+.dsh/
+.dsh-debug/
 # ── build outputs ─────────────────────────────────────────────────
 dist/
 out/

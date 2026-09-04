@@ -40,7 +40,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const explicitPath = config.get<string | null>("dshPath", null);
   const externalUrl = config.get<string | null>("externalUrl", null);
   const discoveryPort = config.get<number>("discoveryPort", 3080);
-  const managedPort = config.get<number>("managedPort", 30800);
+  const managedPort = config.get<number>("managedPort", 3080);
   const autoStart = config.get<boolean>("autoStart", true);
 
   const dsh = new DshService({
@@ -55,6 +55,59 @@ export function activate(context: vscode.ExtensionContext): void {
       provider.post({ type: "serviceStatus", status, detail });
     },
     onLog: (line) => log(line),
+    onRequestExternalToken: async ({ port, reason }) => {
+      const url = await vscode.window.showInputBox({
+        title: "DSH 需要认证",
+        prompt: `端口 ${String(port)} 上已有一个 dsh：${reason}。请粘贴 dsh web 启动时打印的完整 URL（含 ?token=）以连接`,
+        placeHolder: "http://127.0.0.1:3080/?token=...",
+        ignoreFocusOut: true,
+        validateInput: (value) => {
+          const v = value.trim();
+          if (v === "") return "请粘贴 dsh web 的完整 URL（含 ?token=）";
+          try {
+            const u = new URL(v);
+            if (u.protocol !== "http:" && u.protocol !== "https:")
+              return "只支持 http/https URL";
+            if (!u.searchParams.has("token")) return "URL 必须包含 ?token=";
+            return "";
+          } catch {
+            return "请粘贴完整的 dsh web URL";
+          }
+        },
+      });
+      const trimmed = url?.trim();
+      return trimmed && trimmed.length > 0 ? trimmed : null;
+    },
+    // 跨工作区/扩展宿主重启复用已换取的会话 cookie（launch token 一次性，
+    // 但 cookie 在 dsh 进程存活期间有效）——避免切换工作区后重新输入 token。
+    loadCachedCookie: async (baseUrl) =>
+      (await context.secrets.get(`dsh-cookie:${baseUrl}`)) ?? null,
+    saveCachedCookie: async (baseUrl, cookie) =>
+      await context.secrets.store(`dsh-cookie:${baseUrl}`, cookie),
+    clearCachedCookie: async (baseUrl) =>
+      await context.secrets.delete(`dsh-cookie:${baseUrl}`),
+    // launch token 缓存：浏览器打开（openInBrowser）需要 ?token= 登录。
+    loadCachedToken: async (baseUrl) =>
+      (await context.secrets.get(`dsh-token:${baseUrl}`)) ?? null,
+    saveCachedToken: async (baseUrl, token) =>
+      await context.secrets.store(`dsh-token:${baseUrl}`, token),
+    clearCachedToken: async (baseUrl) =>
+      await context.secrets.delete(`dsh-token:${baseUrl}`),
+    // "Esc 跳过认证"的持久记忆（globalState，机器级）：切换工作区/重载窗口后
+    // 不再反复弹 token 输入框，直接退避为自托管启动；端口不再出现需认证
+    // 实例时由服务侧自动清除。
+    loadAuthDeclined: async (baseUrl) =>
+      context.globalState.get<boolean>(`dsh-auth-declined:${baseUrl}`, false),
+    setAuthDeclined: async (baseUrl, declined) => {
+      await context.globalState.update(
+        `dsh-auth-declined:${baseUrl}`,
+        declined ? true : undefined,
+      );
+    },
+    onNotice: (text) => {
+      log(`[notice] ${text}`);
+      void vscode.window.showInformationMessage(text);
+    },
   });
   activeDsh = dsh;
 
@@ -70,6 +123,14 @@ export function activate(context: vscode.ExtensionContext): void {
   // M4: pending 交互闭环（审批 / ask-user / plan-review）——帧→列表、应答/取消走
   // /api/respond（rpcId 留在扩展侧），结算由 resolved 帧驱动。
   const pending = new PendingInteractionService(() => dsh.client);
+
+  // 多端兜底：agent 推进到回合边界（turn/end、turn/start）时该会话的 pending
+  // 交互必然已结算。0.1.2 的 $events 流仅在取消时发 cancel 行，浏览器端应答后
+  // 扩展端收不到 resolved 帧——回合边界来自 session/follow 流（而非 mux 帧），
+  // 由 ConversationService 转发。
+  conversations.on("turnBoundary", (sessionId: string) => {
+    pending.settleBySession(sessionId);
+  });
 
   // M3b: / 指令服务（commands/list + execute 契约跟随；/model 数据面）。
   const commands = new CommandService(() => dsh.client);
@@ -296,6 +357,7 @@ export function activate(context: vscode.ExtensionContext): void {
     pickDshPath,
     restartDsh,
     context.extensionUri,
+    context.extension.id,
   );
 
   context.subscriptions.push(
@@ -347,7 +409,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       "weinibuliu.dsh-vsc.openInBrowser",
       async () => {
-        const url = dsh.baseUrl;
+        // 0.1.2+ 的 dsh 需要 ?token= 才能在浏览器完成登录：用带 token 的
+        // browserUrl（无 token 时退回裸 baseUrl，兼容旧版无认证 dsh）。
+        const url = dsh.browserUrl;
         if (!url) {
           void vscode.window.showErrorMessage("dsh web 尚未就绪");
           return;
@@ -365,6 +429,20 @@ export function activate(context: vscode.ExtensionContext): void {
       "weinibuliu.dsh-vsc.refreshSessions",
       async () => {
         await provider.refreshSessions();
+      },
+    ),
+    vscode.commands.registerCommand(
+      "weinibuliu.dsh-vsc.repromptAuth",
+      async () => {
+        // 清除"Esc 跳过认证"记忆并重连：外部认证实例仍在时将重新弹 token 输入框。
+        try {
+          await dsh.clearAuthDecline();
+          await dsh.restart();
+        } catch (error) {
+          void vscode.window.showErrorMessage(
+            `dsh 认证重连失败: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       },
     ),
   );

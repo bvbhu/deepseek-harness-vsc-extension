@@ -30,7 +30,7 @@ describe("AgentPresetService", () => {
       },
     ];
     const subject = service(async <T>(method: string) => {
-      expect(method).toBe("agentPreset.list");
+      expect(method).toBe("agentPresets/list");
       reads += 1;
       return { presets, authorable: false, hasDocument: false } as T;
     });
@@ -51,10 +51,10 @@ describe("AgentPresetService", () => {
       releaseRefresh = resolve;
     });
     const subject = service(async <T>(method: string, payload: unknown) => {
-      if (method === "agentPreset.list")
+      if (method === "agentPresets/list")
         return { presets: [STANDARD], authorable: false, hasDocument: false } as T;
-      expect(payload).toEqual({ sessionId: "s1", agentPreset: "standard" });
-      return { agentPreset: "standard" } as T;
+      expect(payload).toEqual({ agentId: "s1", agentPreset: "standard" });
+      return "standard" as T;
     });
     await subject.list();
     subject.stage(null, "standard");
@@ -83,7 +83,7 @@ describe("AgentPresetService", () => {
 
   it("retains a stage after a retryable transport failure", async () => {
     const subject = service(async <T>(method: string) => {
-      if (method === "agentPreset.list")
+      if (method === "agentPresets/list")
         return { presets: [STANDARD], authorable: false, hasDocument: false } as T;
       throw new Error("socket closed");
     });
@@ -97,7 +97,7 @@ describe("AgentPresetService", () => {
   it("clears a stage when the host proves the preset is no longer selectable", async () => {
     let reads = 0;
     const subject = service(async <T>(method: string) => {
-      if (method === "agentPreset.list") {
+      if (method === "agentPresets/list") {
         reads += 1;
         return {
           presets: reads === 1 ? [STANDARD] : [{ ...STANDARD, broken: "bad yaml" }],

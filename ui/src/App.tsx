@@ -132,6 +132,12 @@ export default function App() {
   useEffect(() => {
     const accept = (kind: string, sessionId: string | null, requestId: number): boolean => {
       const key = `${kind}:${composerKey(sessionId)}`
+      // requestId=0 是后台刷新哨兵（refreshComposerCatalogs 无 webview requestId）：
+      // 始终接受，否则用户先开过一次 /model（requestId>0 写入 latestApplied）后，
+      // 后续后台刷新（会话切换/新建/重水合）会被误判为过期而丢弃，模型/命令/技能
+      // 目录不再更新。不更新 latestApplied（保持用户请求的高水位），确保陈旧的
+      // 用户主动请求（requestId 较小）仍被拒绝。
+      if (requestId === 0) return true
       const seen = latestApplied.current.get(key) ?? -1
       if (requestId < seen) return false
       latestApplied.current.set(key, requestId)

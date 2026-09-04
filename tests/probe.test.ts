@@ -15,21 +15,19 @@ afterEach(async () => {
 });
 
 describe("probeDsh", () => {
-  it("recognizes the DSH RPC envelope and both event downlinks without rejecting its version", async () => {
-    const baseUrl = await startFixture(
-      ["/api/events.mux", "/api/events.host"],
-      "0.0.1",
-    );
+  it("recognizes a 0.1.2 endpoint via the $events ready handshake", async () => {
+    const baseUrl = await startFixture(true);
 
     await expect(probeDsh(baseUrl)).resolves.toMatchObject({
       kind: "dsh",
       baseUrl,
-      description: { version: "0.0.1", cwd: "/fixture" },
+      description: { cwd: "/fixture" },
+      clientId: "test-client",
     });
   });
 
-  it("does not recognize an endpoint when one DSH downlink is missing", async () => {
-    const baseUrl = await startFixture(["/api/events.mux"], "9.9.9");
+  it("reports not-dsh when the remote.mux upgrade is absent", async () => {
+    const baseUrl = await startFixture(false);
 
     await expect(probeDsh(baseUrl)).resolves.toMatchObject({
       kind: "not-dsh",
@@ -45,52 +43,59 @@ describe("probeDsh", () => {
       /根路径/u,
     );
   });
-});
 
-async function startFixture(
-  upgradePaths: string[],
-  version: string,
-): Promise<string> {
-  const server = createServer((request, response) => {
-    if (request.url !== "/api/host.describe" || request.method !== "POST") {
-      response.writeHead(404).end();
-      return;
-    }
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk) => {
-      body += String(chunk);
-    });
-    request.on("end", () => {
-      const message = JSON.parse(body) as { rpcId: string };
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          type: "server-response",
-          rpcId: message.rpcId,
-          result: {
-            ok: true,
-            value: {
-              version,
-              cwd: "/fixture",
-              attachedSessions: 0,
-              canOpenPath: false,
-            },
-          },
-        }),
-      );
-    });
-  });
-  const wss = new WebSocketServer({ noServer: true });
-  server.on("upgrade", (request, socket, head) => {
-    if (!request.url || !upgradePaths.includes(request.url)) {
-      socket.destroy();
-      return;
-    }
-    wss.handleUpgrade(request, socket, head, (ws) =>
-      wss.emit("connection", ws, request),
+  it("strips a ?token= launch token from an external URL", () => {
+    expect(normalizeDshBaseUrl("http://127.0.0.1:3080/?token=abc")).toBe(
+      "http://127.0.0.1:3080",
+    );
+    expect(normalizeDshBaseUrl("http://127.0.0.1:3080?token=abc#frag")).toBe(
+      "http://127.0.0.1:3080",
     );
   });
+});
+
+/**
+ * 0.1.2 fixture: a WebSocket upgrader on /api/remote.mux that answers the
+ * `$events` open with a `ready` item. With `withMux=false` no upgrader is
+ * registered, so the probe's WS handshake fails and (GET / → 404) it reports
+ * not-dsh.
+ */
+async function startFixture(withMux: boolean): Promise<string> {
+  const server = createServer((_request, response) => {
+    response.writeHead(404).end();
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  if (withMux) {
+    server.on("upgrade", (request, socket, head) => {
+      if (request.url !== "/api/remote.mux") {
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        ws.on("message", (data) => {
+          let frame: { type?: string; streamId?: string; endpoint?: string };
+          try {
+            frame = JSON.parse(String(data));
+          } catch {
+            return;
+          }
+          if (frame.type === "open" && frame.endpoint === "$events") {
+            ws.send(
+              JSON.stringify({
+                type: "item",
+                streamId: frame.streamId,
+                value: {
+                  type: "ready",
+                  clientId: "test-client",
+                  host: { home: "/fixture" },
+                },
+              }),
+            );
+          }
+        });
+      });
+    });
+  }
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   servers.push(server);
   websocketServers.push(wss);

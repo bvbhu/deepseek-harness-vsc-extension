@@ -2,7 +2,7 @@
   "name": "dsh-vsc",
   "displayName": "DeepSeek Harness",
   "description": "DeepSeek Harness(dsh) for VS Code",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "publisher": "bvbhu",
   "contributors": [
     { "name": "不留", "github": "weinibuliu" },
@@ -89,6 +89,10 @@
       {
         "command": "weinibuliu.dsh-vsc.refreshSessions",
         "title": "dsh: Refresh Sessions"
+      },
+      {
+        "command": "weinibuliu.dsh-vsc.repromptAuth",
+        "title": "dsh: 重新提示外部 dsh 认证（清除 Esc 跳过记忆）"
       }
     ],
     "configuration": {
@@ -105,7 +109,7 @@
         },
         "weinibuliu.dsh-vsc.minDshVersion": {
           "type": "string",
-          "default": "0.1.0-rc.6",
+          "default": "0.1.2-rc.1",
           "scope": "machine",
           "description": "Reserved compatibility floor. Versions are currently recorded but not rejected.",
           "deprecationMessage": "Temporarily inactive until DSH exposes a trustworthy compatibility version."
@@ -131,9 +135,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65535,
-          "default": 30800,
+          "default": 3080,
           "scope": "machine",
-          "description": "Fixed loopback port used by the cross-window managed DSH runtime. A non-DSH listener is reported as a conflict."
+          "description": "Loopback port for the managed DSH runtime (dsh default 3080). If occupied by a DSH requiring auth, the extension prompts for its ?token= URL (pressing Esc remembers the skip and falls back to a self-hosted dsh on an ephemeral port; run \"dsh: 重新提示外部 dsh 认证\" to prompt again); if occupied by a non-DSH program, it backs off."
         },
         "weinibuliu.dsh-vsc.autoStart": {
           "type": "boolean",

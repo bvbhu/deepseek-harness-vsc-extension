@@ -119,6 +119,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly pickDshPath: () => Promise<void>,
     private readonly restartDsh: () => Promise<void>,
     private readonly extensionUri: vscode.Uri,
+    private readonly extensionId: string,
   ) {
     // Streaming/replay updates: push a fresh snapshot whenever the selected
     // session's fold changes (chunk deltas, turn boundaries, replay resync).
@@ -229,9 +230,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           items: this.pendingInteractions.snapshot(message.sessionId),
         });
         // M3b: / 命令目录随会话切换重拉（agent-backed，commands/change 亦失效）。
+        // requestId 传 0（后台刷新哨兵）：navigationId 与 webview 的
+        // requestSeq 是两套计数器，直接比较会导致 requestSeq > navigationId
+        // 时目录刷新被误判过期；导航本身已由 navigationId < this.navigationId
+        // 守卫，此处无需再经 accept 的高水位检查。
         await this.refreshComposerCatalogs(
           message.sessionId,
-          message.navigationId,
+          0,
         );
         await this.refreshAgentPresets(message.sessionId, message.navigationId);
         break;
@@ -528,9 +533,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.serveOpenSettingsYaml();
         break;
       case "openExtensionSettings":
+        // 过滤到本扩展贡献的设置：扩展 ID 随 publisher 变更，动态取当前实例。
         await vscode.commands.executeCommand(
           "workbench.action.openSettings",
-          "@ext:weinibuliu.dsh-vsc",
+          `@ext:${this.extensionId}`,
         );
         break;
       case "openInBrowser":

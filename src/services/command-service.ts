@@ -14,6 +14,7 @@ import { DshRpcError, type WireClient } from "../dsh/wire.ts";
 import type {
   CommandDescriptorView,
   SessionModelsView,
+  SessionSummary,
 } from "../shared/protocol.ts";
 
 /** commands/list 的原始 wire 行（descriptor）。 */
@@ -65,9 +66,14 @@ interface RawModelFailure {
   message: string;
 }
 
-interface RawSessionModels {
-  current: { provider: string; model: string; reasoningEffort?: string } | null;
-  routable: boolean | null;
+/**
+ * session/modelCatalog 响应（0.1.2 起替代 per-session 的 session.models）：
+ * catalog 是全局的，会话当前选择改由 session/list 的 projections.modelSelection
+ * 提供（见 models()）。
+ */
+interface RawModelCatalog {
+  default: { provider: string; model: string; reasoningEffort?: string };
+  routableProviders: string[];
   groups: RawModelGroup[];
   failures?: RawModelFailure[];
 }
@@ -104,9 +110,7 @@ export class CommandService {
     if (this.available !== null) return this.available;
     const client = this.requireClient();
     try {
-      await client.call<unknown>("commands/list", {
-        args: { agentId: sessionId },
-      });
+      await client.call<unknown>("commands/list", { agentId: sessionId });
       this.available = true;
     } catch (error) {
       this.available = error instanceof DshRpcError;
@@ -142,9 +146,7 @@ export class CommandService {
     const client = this.requireClient();
     const value = await client.call<RawCommandExecution | undefined>(
       "commands/execute",
-      {
-        args: { agentId: sessionId, line },
-      },
+      { agentId: sessionId, line, images: [] },
     );
     if (!value) return null;
     return {
@@ -154,24 +156,22 @@ export class CommandService {
     };
   }
 
-  /** session.models 投影（/model 弹出层 + 输入框下方席位共享的目录快照）。 */
+  /** session/modelCatalog 投影（/model 弹出层 + 输入框下方席位共享的目录快照）。 */
   async models(sessionId: string): Promise<SessionModelsView> {
     const client = this.requireClient();
-    const raw = await client.call<RawSessionModels>("session.models", {
-      sessionId,
-    });
-    return {
-      current:
-        raw.current === null
-          ? null
-          : {
-              provider: raw.current.provider,
-              model: raw.current.model,
-              ...(raw.current.reasoningEffort === undefined
-                ? {}
-                : { reasoningEffort: raw.current.reasoningEffort }),
-            },
-      routable: raw.routable ?? null,
+    const raw = await client.call<RawModelCatalog>("session/modelCatalog", {});
+    let current:
+      | { provider: string; model: string; reasoningEffort?: string }
+      | null = {
+      provider: raw.default.provider,
+      model: raw.default.model,
+      ...(raw.default.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: raw.default.reasoningEffort }),
+    };
+    const result: SessionModelsView = {
+      current,
+      routable: raw.routableProviders.length > 0 ? true : null,
       groups: raw.groups.map((g) => ({
         id: g.id,
         name: g.name,
@@ -200,6 +200,50 @@ export class CommandService {
       })),
       error: null,
     };
+    try {
+      // 0.1.2 起没有 per-session 的 models RPC；会话当前选择来自
+      // session/list 的 projections.modelSelection.lastUsed（投影缺席 → 回落
+      // catalog 默认）。
+      const { items } = await client.call<{ items: SessionSummary[] }>(
+        "session/list",
+        { _request: {} },
+      );
+      const row = items.find(
+        (item) => item.sessionId === sessionId,
+      ) as
+        | {
+            projections?: {
+              values?: {
+                modelSelection?: {
+                  lastUsed?: {
+                    provider: string;
+                    model: string;
+                    reasoningEffort?: string;
+                  } | null;
+                };
+              };
+            };
+          }
+        | undefined;
+      const lastUsed = row?.projections?.values?.modelSelection?.lastUsed;
+      if (lastUsed !== null && lastUsed !== undefined) {
+        current = {
+          provider: lastUsed.provider,
+          model: lastUsed.model,
+          ...(lastUsed.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: lastUsed.reasoningEffort }),
+        };
+        result.current = current;
+      }
+    } catch (error) {
+      // 会话未知（尚未落库）→ 保留 catalog 默认。仅吞业务错误
+      // (DshRpcError)；传输故障（网络/超时/服务器不可达）向上传播，
+      // 避免静默显示错误模型。
+      if (error instanceof DshRpcError) return result;
+      throw error;
+    }
+    return result;
   }
 
   /** session.selectModel（/model 选中 / 席位切换；effort 缺席 = 回落模型默认）。 */
@@ -210,18 +254,20 @@ export class CommandService {
     effort?: string,
   ): Promise<void> {
     const client = this.requireClient();
-    await client.call<{ selected: unknown }>("session.selectModel", {
-      sessionId,
-      provider,
-      model,
-      ...(effort === undefined ? {} : { reasoningEffort: effort }),
+    await client.call<{ selected: unknown }>("session/selectModel", {
+      request: {
+        sessionId,
+        provider,
+        model,
+        ...(effort === undefined ? {} : { reasoningEffort: effort }),
+      },
     });
   }
 
   private async pull(sessionId: string): Promise<CommandDescriptorView[]> {
     const client = this.requireClient();
     const raw = await client.call<RawCommandDescriptor[]>("commands/list", {
-      args: { agentId: sessionId },
+      agentId: sessionId,
     });
     const items = raw.map((c) => ({
       name: c.name,

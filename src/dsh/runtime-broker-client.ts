@@ -25,6 +25,10 @@ export interface RuntimeBrokerLease {
   pid: number | null;
   managed: boolean;
   reportedVersion: string;
+  /** 0.1.2+ 的会话 cookie；旧版 dsh 没有认证时缺席。 */
+  cookie?: string;
+  /** 0.1.2+ 的 launch token（托管实例就绪 URL 携带；浏览器打开需 ?token=）。 */
+  token?: string;
   dispose(): void;
 }
 
@@ -105,7 +109,13 @@ export async function acquireRuntimeBroker(options: {
         1_000,
         Math.max(500, deadline - Date.now()),
       ).catch((error: unknown) => {
-        if (error instanceof BrokerRejectedError) throw error;
+        if (error instanceof BrokerRejectedError) {
+          // 临时端口请求（port 0）遇上旧版本 Broker（不认识 port 0）会被拒为
+          // configuration。旧 Broker 会在最后一个租约清空约 1.5s 后自行退出，
+          // 继续重试即可由新 Broker 接管，因此视为可重试而非致命错误。
+          if (!(options.port === 0 && error.code === "configuration"))
+            throw error;
+        }
         return null;
       });
       if (connected) return connected;
@@ -129,7 +139,17 @@ export async function acquireRuntimeBroker(options: {
               env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
             },
           );
-          broker.once("error", () => undefined);
+          broker.once("error", () => {
+            // spawn 失败（权限/路径无效等）不会触发 exit 事件——若不在此释放
+            // launch lock，锁会被持有到 deadline 超时，期间其它窗口因看到
+            // holder PID 存活而持续空转。
+            void releaseLaunchLockIfOurs(
+              options.paths.launchLock,
+              process.pid,
+            ).then((released) => {
+              if (released) ownsLaunchLock = false;
+            });
+          });
           broker.unref();
           // If this broker dies before we acquire a lease (e.g. the previous
           // broker still held the Windows named pipe while it tore down), give
@@ -259,6 +279,8 @@ async function connectAndAcquire(
     pid: reply.pid,
     managed: reply.managed,
     reportedVersion: reply.reportedVersion,
+    cookie: reply.cookie,
+    token: reply.token,
     dispose: () => socket.end(),
   };
 }

@@ -7,9 +7,16 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import type { DshLauncher } from "./discovery.ts";
+import { extractLaunchToken, stripToken } from "./auth.ts";
+import { isAtLeast } from "./version.ts";
 
-/** The ready line dsh-web-app prints once the server is listening (§3). */
-const URL_LINE_RE = /dsh web: (http:\/\/127\.0\.0\.1:\d+)/u;
+/**
+ * The ready line dsh-web-app prints once the server is listening (§3).
+ * 0.1.2+ prints the authenticated URL, e.g.
+ * `dsh web: http://127.0.0.1:38678/?token=abc...` — the token is captured so
+ * the caller can exchange it for a session cookie (see auth.ts).
+ */
+const URL_LINE_RE = /dsh web: (http:\/\/127\.0\.0\.1:\d+(?:\/[^\s]*)?)/u;
 
 /** How long to wait for the ready line before failing boot. */
 const BOOT_TIMEOUT_MS = 60_000;
@@ -36,6 +43,8 @@ export interface StartedDshServer {
   baseUrl: string;
   /** The bound port parsed from DSH's ready URL. */
   port: number;
+  /** Launch token from the ready URL (0.1.2+); undefined on older dsh. */
+  token?: string;
   /** Send SIGTERM, wait up to GRACE_MS, then SIGKILL; resolves the exit code. */
   stop(): Promise<number | null>;
   /** Settles when the process exits for any reason (code or signal). */
@@ -59,6 +68,9 @@ export function startDshWeb(
       "web",
       "--port",
       String(port),
+      // 0.1.2 起 `dsh web` 会尝试打开默认浏览器；扩展自托管的子进程不需要。
+      // 旧版不认识该开关，因此只在探测到的版本足够新时追加。
+      ...(supportsNoOpen(launcher.version) ? ["--no-open"] : []),
     ];
     // Windows batch/shim launchers (dsh.cmd, dsh.ps1, npx.cmd) need a shell;
     // only a real .exe can be spawned directly. An absolute .cmd path still
@@ -105,9 +117,20 @@ export function startDshWeb(
         if (match?.[1]) {
           settled = true;
           clearTimeout(bootTimer);
-          const baseUrl = match[1];
-          const port = Number(new URL(baseUrl).port);
-          resolve(makeServer(child, baseUrl, port, exited));
+          const readyUrl = match[1];
+          // 0.1.2+ 的 ready URL 形如 `http://127.0.0.1:38678/?token=...`：
+          // baseUrl 去掉 token 供 /api 调用，token 交给调用方换取 cookie。
+          const baseUrl = stripToken(readyUrl);
+          const port = Number(new URL(readyUrl).port);
+          resolve(
+            makeServer(
+              child,
+              baseUrl,
+              port,
+              exited,
+              extractLaunchToken(readyUrl) ?? undefined,
+            ),
+          );
           return;
         }
       }
@@ -139,6 +162,11 @@ export function startDshWeb(
   });
 }
 
+/** `--no-open` arrived with the 0.1.2 browser handoff; older dsh rejects it. */
+function supportsNoOpen(version: string | undefined): boolean {
+  return version !== undefined && isAtLeast(version, "0.1.2-rc.1");
+}
+
 /**
  * True when the launcher must run through a shell (cmd.exe). On Windows only
  * a real `.exe` can be spawned directly; batch shims (`dsh.cmd`, `npx.cmd`)
@@ -157,6 +185,7 @@ function makeServer(
   baseUrl: string,
   port: number,
   exited: Promise<number | null>,
+  token?: string,
 ): StartedDshServer {
   let stopping = false;
   let stoppedResolve: ((code: number | null) => void) | undefined;
@@ -171,6 +200,7 @@ function makeServer(
   return {
     baseUrl,
     port,
+    token,
     child,
     exited,
     async stop(): Promise<number | null> {

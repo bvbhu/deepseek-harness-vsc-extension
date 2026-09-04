@@ -39,8 +39,12 @@ interface WireQuestion {
 interface PendingEntry {
   key: string;
   sessionId: string;
-  rpcId: string;
+  /** 0.1.2 waterfall eventId（$events/result 应答凭据）。 */
+  eventId: string;
+  kind: "approval" | "question";
   view: PendingItemView;
+  /** 创建时间戳：兜底结算只清理"足够老"的条目，避免同批帧竞态误关刚弹的框。 */
+  createdAt: number;
 }
 
 /** 结构镜像的 mux 帧（本服务消费 4 类；其余帧不属本服务）。 */
@@ -96,7 +100,7 @@ export class PendingInteractionService extends EventEmitter {
           ...(payload.reason !== undefined ? { reason: payload.reason } : {}),
           ...(payload.callId !== undefined ? { callId: payload.callId } : {}),
         };
-        this.upsert(key, payload.sessionId, frame.rpcId, view);
+        this.upsert(key, payload.sessionId, payload.approvalId, "approval", view);
         break;
       }
       case "approval/resolved":
@@ -105,7 +109,7 @@ export class PendingInteractionService extends EventEmitter {
       case "question/requested": {
         const key = `q:${frame.rpcId}`;
         const view = narrowQuestions(key, payload.questions);
-        this.upsert(key, payload.sessionId, frame.rpcId, view);
+        this.upsert(key, payload.sessionId, frame.rpcId, "question", view);
         break;
       }
       case "question/resolved":
@@ -120,8 +124,12 @@ export class PendingInteractionService extends EventEmitter {
    * Answer a pending interaction. approval answers the wire outcome;
    * question/plan-review answers the structured answer batch. Returns the
    * carrier receipt: `accepted:false` (not-pending/bad-response) is NOT an
-   * error — the host already settled (race) or the encoding was wrong; the
-   * resolved frame decides removal.
+   * error — the host already settled (race) or the encoding was wrong.
+   *
+   * 应答成功（accepted:true）即移除条目：0.1.2 的 $events 流仅在**取消**时
+   * 发 cancel 行（→ onCancel → approval/resolved mux 帧），正常应答
+   * （allow/deny/answer）不产生 resolved 帧——若依赖 resolved 帧结算，
+   * 弹窗将永远不关闭。cancel 帧迟到时 settle 已无条目可删（幂等安全）。
    */
   async answer(
     sessionId: string,
@@ -130,23 +138,21 @@ export class PendingInteractionService extends EventEmitter {
   ): Promise<RpcReceipt> {
     const entry = this.requireEntry(sessionId, key);
     const client = this.requireClient();
-    if (answer.kind === "approval") {
-      return await client.respond(entry.rpcId, {
-        ok: true,
-        value: {
-          sessionId,
-          approvalId: key.slice(2),
-          outcome: answer.outcome,
-        },
-      });
-    }
-    return await client.respond(entry.rpcId, {
-      ok: true,
-      value: {
-        sessionId,
-        answer: { answers: answer.answers },
-      },
-    });
+    const clientId = client.eventsClientIdValue;
+    if (!clientId)
+      return { accepted: false, reason: "dsh 尚未完成握手，无法应答" };
+    const receipt =
+      answer.kind === "approval"
+        ? await client.answerEvent(clientId, entry.eventId, {
+            kind: "result",
+            value: answer.outcome,
+          })
+        : await client.answerEvent(clientId, entry.eventId, {
+            kind: "result",
+            value: { answers: answer.answers },
+          });
+    if (receipt.accepted === true) this.settle(key);
+    return receipt;
   }
 
   /** Cancel a pending question/plan-review (= cancelled error; approval has no client cancel). */
@@ -158,26 +164,42 @@ export class PendingInteractionService extends EventEmitter {
       );
     }
     const client = this.requireClient();
-    return await client.respond(entry.rpcId, {
-      ok: false,
+    const clientId = client.eventsClientIdValue;
+    if (!clientId)
+      return { accepted: false, reason: "dsh 尚未完成握手，无法应答" };
+    const receipt = await client.answerEvent(clientId, entry.eventId, {
+      kind: "rejected",
       error: {
         code: "cancelled",
         message: "the user closed this question request",
         details: {},
       },
     });
+    if (receipt.accepted === true) this.settle(key);
+    return receipt;
   }
 
   private upsert(
     key: string,
     sessionId: string,
-    rpcId: string,
+    eventId: string,
+    kind: "approval" | "question",
     view: PendingItemView,
   ): void {
-    // Replay of the same rpcId refreshes the payload in place (Map.set keeps
+    // Replay of the same eventId refreshes the payload in place (Map.set keeps
     // insertion order — oldest-first preserved); still notify so the webview
     // re-renders the (possibly refreshed) card, but never a duplicate entry.
-    this.entries.set(key, { key, sessionId, rpcId, view });
+    // 重放不得重置 createdAt：兜底结算按条目年龄保护，重放刷新生效后不应
+    // 让"新弹的框"立刻变成"老条目"而被误关。
+    const existing = this.entries.get(key);
+    this.entries.set(key, {
+      key,
+      sessionId,
+      eventId,
+      kind,
+      view,
+      createdAt: existing?.createdAt ?? Date.now(),
+    });
     this.emit("change", sessionId);
   }
 
@@ -187,6 +209,28 @@ export class PendingInteractionService extends EventEmitter {
     if (!entry) return;
     this.entries.delete(key);
     this.emit("change", entry.sessionId);
+  }
+
+  /**
+   * 多端兜底结算：agent 推进到明确的回合边界（turn/end、turn/start）时，说明
+   * 该会话的 pending 交互必然已结算——浏览器端应答后扩展端收不到 resolved 帧
+   * （DSH 仅在取消时发 cancel 行），靠回合边界兜底关闭，避免多端不同步。
+   *
+   * 只清理"足够老"的条目：approval/requested 与随后的回合边界帧可能在同一批
+   * mux 数据里到达（或被流交错），刚弹的框若立即被清，用户来不及点击"允许"。
+   * minAgeMs 默认 1000ms——正常流程下回合边界必然在用户应答（或对端应答）
+   * 之后才出现，弹窗已展示足够时间。
+   */
+  settleBySession(sessionId: string, minAgeMs = 1_000): void {
+    const cutoff = Date.now() - minAgeMs;
+    let changed = false;
+    for (const entry of [...this.entries.values()]) {
+      if (entry.sessionId === sessionId && entry.createdAt <= cutoff) {
+        this.entries.delete(entry.key);
+        changed = true;
+      }
+    }
+    if (changed) this.emit("change", sessionId);
   }
 
   private requireEntry(sessionId: string, key: string): PendingEntry {

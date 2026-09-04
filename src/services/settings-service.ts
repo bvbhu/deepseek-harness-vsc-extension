@@ -65,6 +65,43 @@ export interface ConfigurableProviderView {
   declared?: boolean;
 }
 
+/** `llm/listProviders` 的行（0.1.2 起只含注册路由的 id/name）。 */
+interface RegisteredProviderView {
+  id: string;
+  name: string;
+}
+
+/**
+ * 合并注册路由与可配置目录（镜像官方 joinProviderDirectory）：
+ * 目录行带 active 标记，注册但无目录声明的路由补为 settingsNs="" 行。
+ */
+function joinProviderDirectory(
+  registered: RegisteredProviderView[],
+  directory: ConfigurableProviderView[],
+): ConfigurableProviderView[] {
+  const active = new Set(registered.map((provider) => provider.id));
+  const declared = new Set(directory.map((entry) => entry.provider));
+  const rows = directory.map((entry) => ({
+    provider: entry.provider,
+    displayName: entry.displayName,
+    settingsNs: entry.settingsNs,
+    settingsPath: [...entry.settingsPath],
+    active: active.has(entry.provider),
+    ...(entry.declared === undefined ? {} : { declared: entry.declared }),
+  }));
+  for (const provider of registered) {
+    if (declared.has(provider.id)) continue;
+    rows.push({
+      provider: provider.id,
+      displayName: provider.name,
+      settingsNs: "",
+      settingsPath: [],
+      active: true,
+    });
+  }
+  return rows;
+}
+
 export type SettingsPathOp =
   | { op: "set"; path: string[]; value: unknown }
   | { op: "unset"; path: string[] };
@@ -302,26 +339,41 @@ export class SettingsService {
     let providers: ConfigurableProviderView[];
     let describe: SettingsDescribeResult;
     try {
-      const [providersResult, describeResult] = await Promise.all([
-        client.call<{ providers: ConfigurableProviderView[] }>(
-          "llm.providers",
-          {},
-        ),
-        client.call<SettingsDescribeResult>("settings.describe", {}),
+      const [registered, describeResult] = await Promise.all([
+        client.call<RegisteredProviderView[]>("llm/listProviders", {}),
+        client.call<SettingsDescribeResult>("settings/describe", {}),
       ]);
-      providers = providersResult.providers;
+      // 0.1.2 起 listProviders 只返回注册路由 [{id,name}]，可配置目录走
+      // listConfigurableProviders；两者合并才得到设置页的 provider 行。
+      // 旧版 dsh 无 listConfigurableProviders 时回退为旧契约（registered
+      // 本身即可配置视图）。
+      let directory: ConfigurableProviderView[];
+      try {
+        directory = await client.call<ConfigurableProviderView[]>(
+          "llm/listConfigurableProviders",
+          {},
+        );
+        providers = joinProviderDirectory(registered, directory);
+      } catch {
+        // 旧版 dsh 无 listConfigurableProviders：将 [{id,name}] 映射为
+        // ConfigurableProviderView，避免 as unknown as 导致下游访问
+        // settingsNs/settingsPath 为 undefined 而渲染垃圾行。
+        providers = registered.map((p) => ({
+          provider: p.id,
+          displayName: p.name,
+          settingsNs: "",
+          settingsPath: [],
+          active: true,
+        }));
+      }
       describe = describeResult;
     } catch (error) {
       throw new Error(`设置读取失败: ${messageOf(error)}`);
     }
 
-    // host.describe 为 dsh 包页的 enrich：失败不拖垮整页（该页仍显示可执行文件/settings.yaml）。
+    // host.describe 在 0.1.2 起已移除（无替代契约），该 enrich 槽保持缺席；
+    // 设置页仍显示可执行文件/settings.yaml。
     let host: HostDescribeView | undefined;
-    try {
-      host = await client.call<HostDescribeView>("host.describe", {});
-    } catch (error) {
-      this.onLog(`[settings] host.describe 失败: ${messageOf(error)}`);
-    }
 
     const namespaces = new Map(
       describe.namespaces.map((view) => [view.ns, view]),
@@ -409,10 +461,11 @@ export class SettingsService {
     const credentials: Record<string, CredentialView> = {};
     if (refs.length > 0) {
       try {
-        const result = await client.call<{
-          credentials: Record<string, CredentialView>;
-        }>("credentials.describe", { refs });
-        Object.assign(credentials, result.credentials);
+        const result = await client.call<Record<string, CredentialView>>(
+          "credentials/describe",
+          { refs },
+        );
+        Object.assign(credentials, result);
       } catch (error) {
         this.onLog(`[settings] credentials.describe 失败: ${messageOf(error)}`);
       }
@@ -471,7 +524,7 @@ export class SettingsService {
       : pathOps(profile.settingsPath, profile.before, profile.after);
     if (ops.length > 0) {
       try {
-        await client.call("settings.mutate", {
+        await client.call("settings/mutate", {
           ns: profile.ns,
           ops,
           expectedRevision: profile.expectedRevision,
@@ -489,7 +542,7 @@ export class SettingsService {
     }
     if (profile.keyValue.length > 0) {
       try {
-        await client.call("credentials.set", {
+        await client.call("credentials/set", {
           ref: profile.keyRef,
           value: profile.keyValue,
         });
@@ -508,13 +561,13 @@ export class SettingsService {
     const client = this.requireClient();
     if (target.credentialRef !== undefined) {
       try {
-        await client.call("credentials.unset", { ref: target.credentialRef });
+        await client.call("credentials/unset", { ref: target.credentialRef });
       } catch (error) {
         return { ok: false, text: `凭据删除失败: ${messageOf(error)}` };
       }
     }
     try {
-      await client.call("settings.mutate", {
+      await client.call("settings/mutate", {
         ns: target.settingsNs,
         ops: [{ op: "unset", path: [...target.settingsPath] }],
       });
@@ -542,7 +595,7 @@ export class SettingsService {
       models: create.models.map((model) => ({ ...model })),
     };
     try {
-      await client.call("settings.mutate", {
+      await client.call("settings/mutate", {
         ns: "llm-pi-ai",
         ops: [{ op: "set", path: ["providers", create.route], value: profile }],
         expectedRevision: create.expectedRevision,
@@ -559,7 +612,7 @@ export class SettingsService {
     }
     if (storesKey) {
       try {
-        await client.call("credentials.set", {
+        await client.call("credentials/set", {
           ref: keyRef,
           value: create.keyValue,
         });
@@ -574,8 +627,8 @@ export class SettingsService {
   async discoverModels(probe: SettingsProbe): Promise<DiscoveredModelView[]> {
     const client = this.requireClient();
     const result = await client.call<{ models: DiscoveredModelView[] }>(
-      "llm.discoverModels",
-      probe,
+      "llm/discoverModels",
+      { settingsNs: probe.settingsNs, request: {} },
     );
     return result.models;
   }
@@ -587,7 +640,7 @@ export class SettingsService {
   ): Promise<SettingsWriteResult> {
     const client = this.requireClient();
     try {
-      await client.call("settings.mutate", {
+      await client.call("settings/mutate", {
         ns: "permission",
         ops: [{ op: "set", path: ["defaultPreset"], value: preset }],
         expectedRevision,
@@ -612,7 +665,7 @@ export class SettingsService {
   ): Promise<SettingsWriteResult> {
     const client = this.requireClient();
     try {
-      await client.call("settings.mutate", {
+      await client.call("settings/mutate", {
         ns: CONVERSATION_SETTINGS_NAMESPACE,
         ops: [{ op: "set", path: [BUSY_ENTER_FIELD], value: behavior }],
         expectedRevision,
@@ -636,7 +689,7 @@ export class SettingsService {
       const client = this.wire();
       if (!client) return DEFAULT_BUSY_ENTER_BEHAVIOR;
       const describe = await client.call<SettingsDescribeResult>(
-        "settings.describe",
+        "settings/describe",
         {},
       );
       const ns = describe.namespaces.find(

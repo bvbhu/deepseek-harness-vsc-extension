@@ -8,6 +8,7 @@ import { chmod, mkdir, unlink, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { dirname } from "node:path";
 import type { DshLauncher } from "./discovery.ts";
+import { acquireAuth } from "./auth.ts";
 import { isTcpPortOccupied, loopbackDshUrl, probeDsh } from "./probe.ts";
 import {
   BROKER_PROTOCOL_VERSION,
@@ -26,6 +27,8 @@ interface RuntimeState {
   port: number;
   server: StartedDshServer | null;
   reportedVersion: string;
+  /** 0.1.2+ 的会话 cookie（launch token 换取）；旧版 dsh 缺席。 */
+  cookie?: string;
 }
 
 class RuntimeBrokerError extends Error {
@@ -43,8 +46,10 @@ let shuttingDown = false;
 let shutdownTimer: NodeJS.Timeout | null = null;
 let listening = false;
 const leases = new Set<Socket>();
+const connected = new Set<Socket>();
 
 const ipc = createServer((socket) => {
+  connected.add(socket);
   let buffer = "";
   let acquired = false;
   socket.setEncoding("utf8");
@@ -57,10 +62,12 @@ const ipc = createServer((socket) => {
     void handleAcquire(socket, buffer.slice(0, newline));
   });
   socket.on("close", () => {
+    connected.delete(socket);
     leases.delete(socket);
     scheduleShutdownIfIdle();
   });
   socket.on("error", () => {
+    connected.delete(socket);
     leases.delete(socket);
     scheduleShutdownIfIdle();
   });
@@ -75,6 +82,10 @@ ipc.on("error", (error: Error) => {
   if (code === "EADDRINUSE" && !shuttingDown) {
     retryListen();
     return;
+  }
+  // 正在优雅关闭（SIGTERM）期间出现的 EADDRINUSE 属于正常竞态，退出码 0。
+  if (code === "EADDRINUSE" && shuttingDown) {
+    process.exit(0);
   }
   process.exit(1);
 });
@@ -141,14 +152,17 @@ async function handleAcquire(socket: Socket, raw: string): Promise<void> {
       request.protocol !== BROKER_PROTOCOL_VERSION ||
       request.type !== "acquire" ||
       !Number.isInteger(request.port) ||
-      request.port < 1 ||
+      request.port < 0 ||
       request.port > 65_535
     )
       throw new RuntimeBrokerError(
         "configuration",
         "无效的 Broker acquire 请求",
       );
-    if (runtime && runtime.port !== request.port) {
+    // port 0 = 临时端口回退启动（管理端口被外部实例占用时）。托管子进程的
+    // 端口可漂移（就绪行决定实际端口），因此仅"采用的外部实例"
+    // （server === null，固定端口）坚持请求端口与运行态一致。
+    if (runtime && runtime.port !== request.port && runtime.server === null) {
       throw new RuntimeBrokerError(
         "configuration",
         `全局 DSH 已固定在端口 ${String(runtime.port)}，不能切换到 ${String(request.port)}`,
@@ -169,6 +183,12 @@ async function handleAcquire(socket: Socket, raw: string): Promise<void> {
       pid: ready.server?.child.pid ?? null,
       managed: ready.server !== null,
       reportedVersion: ready.reportedVersion,
+      cookie: ready.cookie,
+      // 托管实例的 launch token（0.1.2+）：进程存活期间可复用，浏览器打开
+      // 需要 ?token= 完成登录；采用的外部实例（server === null）缺席。
+      ...(ready.server?.token === undefined
+        ? {}
+        : { token: ready.server.token }),
     });
   } catch (error) {
     send(socket, {
@@ -200,6 +220,20 @@ async function bootRuntime(
   port: number,
   launcher?: DshLauncher,
 ): Promise<RuntimeState> {
+  if (port === 0) {
+    // 临时端口模式：管理端口被未认证 dsh/其它程序占用时的回退启动。
+    // 让 OS 挑空闲端口，就绪行携带实际端口（startDshWeb 负责解析），
+    // 不存在绑定竞争，无需 probe/占用预检。
+    if (!launcher)
+      throw new RuntimeBrokerError(
+        "launcher-required",
+        "启动 DSH 需要可执行文件信息",
+      );
+    const server = await startDshWeb({ launcher, port: 0 });
+    const state = await adoptStartedServer(server, launcher);
+    await publishMetadata(state);
+    return state;
+  }
   const baseUrl = loopbackDshUrl(port);
   const existing = await probeDsh(baseUrl);
   if (existing.kind === "dsh") {
@@ -207,10 +241,18 @@ async function bootRuntime(
       baseUrl,
       port,
       server: null,
-      reportedVersion: existing.description.version,
+      reportedVersion: existing.description.version || launcher?.version || "",
     };
     await publishMetadata(state);
     return state;
+  }
+  if (existing.kind === "auth-required") {
+    // A live 0.1.2+ dsh on the managed port, but this Broker has no launch
+    // token to mint a cookie. We cannot adopt it.
+    throw new RuntimeBrokerError(
+      "port-conflict",
+      `DSH 管理端口 ${String(port)} 已有一个要求认证的实例（0.1.2+），但 Broker 缺少其 launch token；请先关闭它或换用其它端口`,
+    );
   }
   if (await isTcpPortOccupied("127.0.0.1", port)) {
     throw new RuntimeBrokerError(
@@ -236,7 +278,7 @@ async function bootRuntime(
         baseUrl,
         port,
         server: null,
-        reportedVersion: winner.description.version,
+        reportedVersion: winner.description.version || launcher.version || "",
       };
       await publishMetadata(state);
       return state;
@@ -250,18 +292,41 @@ async function bootRuntime(
     throw error;
   }
 
-  const verified = await probeDsh(baseUrl, 5_000);
+  const state = await adoptStartedServer(server, launcher);
+  await publishMetadata(state);
+  return state;
+}
+
+/** 认证交换 + 握手验证 + 组装运行态（固定端口与临时端口启动共用）。 */
+async function adoptStartedServer(
+  server: StartedDshServer,
+  launcher: DshLauncher,
+): Promise<RuntimeState> {
+  const baseUrl = server.baseUrl;
+  // 0.1.2+ 打印带 ?token= 的 URL：换取会话 cookie 后才有权访问 /api 与 mux。
+  let cookie: string | undefined;
+  if (server.token) {
+    try {
+      cookie = (await acquireAuth(baseUrl, server.token)).cookie;
+    } catch (error) {
+      await server.stop();
+      throw new Error(
+        `dsh web 已启动但认证交换失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  const verified = await probeDsh(baseUrl, 5_000, cookie);
   if (verified.kind !== "dsh") {
     await server.stop();
     throw new Error(`已启动进程但 DSH 握手失败：${verified.reason}`);
   }
-  const state = {
+  const state: RuntimeState = {
     baseUrl,
-    port,
+    port: server.port,
     server,
-    reportedVersion: verified.description.version,
+    cookie,
+    reportedVersion: launcher.version ?? verified.description.version,
   };
-  await publishMetadata(state);
   void server.exited.then(() => {
     if (runtime?.server === server) runtime = null;
   });
@@ -291,11 +356,20 @@ function send(socket: Socket, reply: BrokerReply): void {
   socket.write(`${JSON.stringify(reply)}\n`);
 }
 
+/**
+ * Idle lifetime after the last lease drops. 必须远大于工作区切换时扩展宿主
+ * 重启的激活间隙（旧窗口租约断开 → 新窗口重新 acquire，通常几秒）：太短会
+ * 在切换间隙自杀并杀掉 dsh，导致新窗口重新走发现/认证流程（外部认证实例
+ * 场景下表现为反复弹 token 输入框）。留足余量后，同一个 dsh 子进程可跨
+ * 工作区切换甚至整窗重启持续服务；dsh 会话本身持久化，无泄漏风险。
+ */
+const IDLE_SHUTDOWN_MS = 30_000;
+
 function scheduleShutdownIfIdle(): void {
   if (shuttingDown || leases.size > 0 || shutdownTimer) return;
   shutdownTimer = setTimeout(() => {
     void shutdown();
-  }, 1_500);
+  }, IDLE_SHUTDOWN_MS);
 }
 
 async function shutdown(): Promise<void> {
@@ -306,7 +380,8 @@ async function shutdown(): Promise<void> {
   // means a late acquire can never re-boot a child mid-shutdown (it will
   // instead spawn a fresh Broker). Then drop any open lease sockets.
   if (ipc.listening) ipc.close(() => undefined);
-  for (const lease of leases) lease.destroy();
+  for (const socket of connected) socket.destroy();
+  connected.clear();
   leases.clear();
   const current = runtime;
   runtime = null;

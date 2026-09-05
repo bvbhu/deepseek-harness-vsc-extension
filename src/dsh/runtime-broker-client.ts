@@ -73,9 +73,14 @@ export async function tryAcquireRuntimeBroker(options: {
       500,
       65_000,
     ).catch((error: unknown) => {
+      // tryAcquireRuntimeBroker 仅尝试连接已存在的 Broker，不负责处理端口
+      // 占用分类（那是 resolveTarget 的职责）。若 Broker 在启动时因端口占用
+      // （port-conflict：需认证的 dsh 或非 dsh 程序）拒绝，应返回 null 让
+      // resolveTarget 走 attachToAuthRequiredDsh/退避路径，而非抛错中断。
       if (
         error instanceof BrokerRejectedError &&
-        error.code !== "launcher-required"
+        error.code !== "launcher-required" &&
+        error.code !== "port-conflict"
       )
         throw error;
       return null;

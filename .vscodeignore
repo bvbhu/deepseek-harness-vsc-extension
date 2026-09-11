@@ -26,6 +26,7 @@ docs
 deepseek-harness
 dsh-src
 cline
+.dsh-debug
 
 *.vsix
 

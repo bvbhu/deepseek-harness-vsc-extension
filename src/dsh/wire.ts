@@ -86,7 +86,14 @@ export interface StreamHandlers {
 }
 
 interface Subscription {
+  /** Logical identity, stable for the subscription's whole lifetime. */
   id: string;
+  /**
+   * Wire streamId of the most recent submission. Re-minted on every `open`
+   * frame (mirrors dsh's own stream-client, which calls `randomUUID()` per
+   * open) because the gateway closes the socket with 1008 on a duplicate id.
+   */
+  wireId: string;
   endpoint: string;
   args: Record<string, unknown>;
   handlers: StreamHandlers;
@@ -102,6 +109,8 @@ export class RemoteMux extends EventEmitter {
   private readonly url: string;
   private readonly cookie?: string;
   private readonly subscriptions = new Map<string, Subscription>();
+  /** Reverse lookup for inbound frames: wire streamId → logical id. */
+  private readonly wireToLogical = new Map<string, string>();
   private ws: WebSocket | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectDelayMs = 1_000;
@@ -139,13 +148,17 @@ export class RemoteMux extends EventEmitter {
     handlers: StreamHandlers,
   ): () => void {
     const id = randomUUID();
-    this.subscriptions.set(id, { id, endpoint, args, handlers });
-    if (this.isOpen) this.sendOpen(id, endpoint, args);
+    const sub: Subscription = { id, wireId: id, endpoint, args, handlers };
+    this.subscriptions.set(id, sub);
+    if (this.isOpen) this.sendOpen(sub);
     return () => {
       this.subscriptions.delete(id);
+      const wireId = sub.wireId;
+      if (this.wireToLogical.get(wireId) === id) this.wireToLogical.delete(wireId);
       // 服务端只认 `cancel` 帧来关闭逻辑流（parseRemoteStreamClientMessage 只
       // 接受 `open` / `cancel`）；发 `close` 会被当成非法消息 → 1008 踢掉整个 mux。
-      this.sendRaw({ type: "cancel", streamId: id });
+      // 必须带上当前生效的 wireId：`open` 帧每次提交都会换新 id，旧 id 服务端已不认识。
+      this.sendRaw({ type: "cancel", streamId: wireId });
     };
   }
 
@@ -164,6 +177,7 @@ export class RemoteMux extends EventEmitter {
     this.ws?.terminate();
     this.ws = null;
     this.subscriptions.clear();
+    this.wireToLogical.clear();
   }
 
   private attemptConnect(): void {
@@ -176,8 +190,10 @@ export class RemoteMux extends EventEmitter {
     ws.on("open", () => {
       this.reconnectDelayMs = 1_000;
       this.emit("open");
-      for (const sub of this.subscriptions.values()) {
-        this.sendOpen(sub.id, sub.endpoint, sub.args);
+      // 快照后再遍历：sendOpen 在发送失败时会从 subscriptions 里删除条目，
+      // 直接迭代 Map 的 values 视图会边删边迭代。
+      for (const sub of [...this.subscriptions.values()]) {
+        this.sendOpen(sub);
       }
     });
     ws.on("message", (data) => {
@@ -195,6 +211,8 @@ export class RemoteMux extends EventEmitter {
     });
     ws.on("close", (code, reason) => {
       this.ws = null;
+      // 旧 socket 上所有 wireId 随之下线：清空反查表，重连后由 sendOpen 重建。
+      this.wireToLogical.clear();
       this.emit("close", code, reason.toString("utf8"));
       if (this.closed) return;
       this.reconnectTimer = setTimeout(() => {
@@ -208,19 +226,32 @@ export class RemoteMux extends EventEmitter {
     });
   }
 
-  private sendOpen(id: string, endpoint: string, args: Record<string, unknown>): void {
+  /**
+   * Submit one logical stream over a freshly minted wire streamId.
+   *
+   * dsh 的 stream-client 参考实现每开一个逻辑流都 `randomUUID()` 一个新 id，
+   * 重连重提交同样如此；网关的 RemoteStreamMuxConnection 对同一 socket 上出现
+   * 重复 streamId 直接 `close(1008, "invalid Remote stream request")`。之前这里
+   * 复用固定的 `sub.id`，重连风暴时与网关侧尚未回收的条目相撞，就是扩展不断被
+   * 1008 踢下线、随后 session/follow 快照超时的根因。
+   */
+  private sendOpen(sub: Subscription): void {
+    const wireId = randomUUID();
+    sub.wireId = wireId;
+    this.wireToLogical.set(wireId, sub.id);
     if (
       !this.sendRaw({
         type: "open",
-        streamId: id,
-        endpoint,
-        payload: { args },
+        streamId: wireId,
+        endpoint: sub.endpoint,
+        payload: { args: sub.args },
       })
     ) {
-      this.subscriptions.delete(id);
+      if (this.wireToLogical.get(wireId) === sub.id) this.wireToLogical.delete(wireId);
+      this.subscriptions.delete(sub.id);
       this.emit(
         "streamError",
-        new Error(`mux 打开 ${endpoint} 失败：连接已断开`),
+        new Error(`mux 打开 ${sub.endpoint} 失败：连接已断开`),
       );
     }
   }
@@ -229,6 +260,8 @@ export class RemoteMux extends EventEmitter {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
     try {
       this.ws.send(JSON.stringify(message));
+      // 诊断用：出帧原样广播，便于把 1008 钉到具体帧（校验形状 / 查重复 streamId）。
+      this.emit("outgoing", message);
       return true;
     } catch {
       return false;
@@ -239,9 +272,11 @@ export class RemoteMux extends EventEmitter {
     this.emit("frame", message);
     if (message === null || typeof message !== "object") return;
     const row = message as Record<string, unknown>;
-    const streamId = row.streamId;
-    if (typeof streamId !== "string") return;
-    const sub = this.subscriptions.get(streamId);
+    const wireId = row.streamId;
+    if (typeof wireId !== "string") return;
+    const logicalId = this.wireToLogical.get(wireId);
+    if (logicalId === undefined) return;
+    const sub = this.subscriptions.get(logicalId);
     if (sub === undefined) return;
     // 处理函数抛错绝不能击穿 WS 消息循环（否则连接被错误终止 → 重连风暴）。
     try {
@@ -251,7 +286,8 @@ export class RemoteMux extends EventEmitter {
           break;
         case "end":
           sub.handlers.onEnd?.();
-          this.subscriptions.delete(streamId);
+          this.subscriptions.delete(sub.id);
+          this.wireToLogical.delete(wireId);
           break;
         case "error": {
           const err = row.error;

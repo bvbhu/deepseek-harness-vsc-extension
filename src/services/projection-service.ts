@@ -40,6 +40,23 @@ function nonNeg(value: unknown): number | undefined {
     : undefined;
 }
 
+/** modelSelection 条目的 wire 边界收窄（{provider, model, reasoningEffort?}）；形状不符视为缺席。 */
+function modelRefOf(
+  value: unknown,
+): { provider: string; model: string; reasoningEffort?: string } | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.provider !== "string" || typeof value.model !== "string") {
+    return null;
+  }
+  return {
+    provider: value.provider,
+    model: value.model,
+    ...(typeof value.reasoningEffort === "string"
+      ? { reasoningEffort: value.reasoningEffort }
+      : {}),
+  };
+}
+
 /** Structural mirror of the history-tail projections block (sessions.schema). */
 export interface ProjectionsBlock {
   /** Seq of the last event the values reflect; -1 for an empty log. */
@@ -92,6 +109,23 @@ export class ProjectionService extends EventEmitter {
     const value = this.slots.get(sessionId)?.get("permissions")?.value;
     if (value === undefined || value === null) return null;
     return value as PermissionSelectView;
+  }
+
+  /**
+   * The session's resolved model selection (modelSelection 投影), or null when
+   * unknown. The wire view is `{ lastUsed, next: pending ?? lastUsed }`: a
+   * fresh `session.selectModel` only advances pending (`next`), while
+   * `lastUsed` moves on the next real LLM request — so the seat must read
+   * `next` to reflect a just-made choice; older gateways whose view lacks
+   * `next` fall back to `lastUsed`.
+   */
+  modelSelectionOf(
+    sessionId: string,
+  ): { provider: string; model: string; reasoningEffort?: string } | null {
+    const value = this.slots.get(sessionId)?.get("modelSelection")?.value;
+    if (!isRecord(value)) return null;
+    const chosen = modelRefOf(value.next) ?? modelRefOf(value.lastUsed);
+    return chosen;
   }
 
   /**

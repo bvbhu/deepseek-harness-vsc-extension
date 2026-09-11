@@ -570,21 +570,48 @@ export class DshService extends EventEmitter {
     });
 
     mux.on("open", () => {
-      this.reconnectFailures = 0;
       if (generation !== this.generation || this.stopping) return;
       // 首次握手的 ready 由 start() 在 openGeneration 返回后设置；这里仅在
       // 重连（ready 已为 true）时恢复 ready，避免握手未完成就触发工作区绑定。
+      // 注意：绝不能在这里清零 reconnectFailures——仅凭 socket 打开不代表协议
+      // 恢复，否则"连上即被 1008 踢掉"的循环永远达不到重启阈值。真正的恢复
+      // 信号是 $events ready（见下方 onItem），成功握手后才归零。
       if (ready) this.setStatus("ready");
     });
     mux.on("close", (code, reason) => {
       if (generation !== this.generation || this.stopping) return;
       if (!ready) return; // handshake未完成：由 openGeneration 的失败路径处理
+      const nextFailure = this.reconnectFailures + 1;
+      // streamCount 是排查 1008 的关键：它决定重连时会重提交多少 open 帧。
       this.options.onLog?.(
-        `[mux] 连接断开 code=${String(code)} reason=${String(reason)}`,
+        `[mux] 连接断开 code=${String(code)} reason=${String(reason)}；` +
+          `重开流数=${String(mux.streamCount)}；连续失败=${String(nextFailure)}`,
       );
+      // onLog 只进输出面板，用户看不到；首断与逼近重启阈值时给出可见提示。
+      if (nextFailure === 1) {
+        this.options.onNotice?.(
+          `dsh 连接中断（code=${String(code)}），正在自动重连…`,
+        );
+      } else if (nextFailure === RECONNECT_BEFORE_RESTART) {
+        this.options.onNotice?.(
+          `dsh 连接反复中断（已连续 ${String(nextFailure)} 次），` +
+            "即将尝试重启 dsh 服务以恢复",
+        );
+      }
       this.emit("muxClose");
       this.setStatus("reconnecting");
       this.onPhysicalDrop();
+    });
+
+    // 诊断：把每个出帧记录下来。网关对非法帧/重复 streamId 一律回 1008 且不说明
+    // 原因，所以只有逐帧比对才能区分"形状不合法"与"streamId 撞车"。
+    mux.on("outgoing", (message: unknown) => {
+      const row = message as Record<string, unknown>;
+      this.options.onLog?.(
+        `[mux] 出帧 type=${String(row.type)} streamId=${String(
+          row.streamId,
+        )} endpoint=${String(row.endpoint ?? "")}`,
+      );
     });
 
     // ---- $events：host 事件 + waterfall + 握手 ready 帧 ----
@@ -596,6 +623,10 @@ export class DshService extends EventEmitter {
             const clientId =
               typeof row.clientId === "string" ? row.clientId : "";
             wire.setEventsClientId(clientId);
+            // 唯一的"已恢复"判据：$events 真正吐出 ready（认证 + 握手成立），
+            // 才清零连续失败计数。重连后 socket 打开但迟迟拿不到 ready 的情况
+            // 会累积到阈值并触发重启，而不会像旧逻辑那样被 open 事件反复清零。
+            this.reconnectFailures = 0;
             if (!ready) {
               ready = true;
               readyResolve?.();

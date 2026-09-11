@@ -78,6 +78,27 @@ interface RawModelCatalog {
   failures?: RawModelFailure[];
 }
 
+/**
+ * modelSelection 投影条目的 wire 边界收窄（{provider, model, reasoningEffort?}）；
+ * 形状不符（缺 provider/model）视为缺席返回 null。
+ */
+function narrowModelRef(
+  value: unknown,
+): { provider: string; model: string; reasoningEffort?: string } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const rec = value as Record<string, unknown>;
+  if (typeof rec.provider !== "string" || typeof rec.model !== "string") {
+    return null;
+  }
+  return {
+    provider: rec.provider,
+    model: rec.model,
+    ...(typeof rec.reasoningEffort === "string"
+      ? { reasoningEffort: rec.reasoningEffort }
+      : {}),
+  };
+}
+
 export class CommandService {
   /** 命令面可用性探测结果（契约跟随 §7.2；null = 未探测）。 */
   private available: boolean | null = null;
@@ -160,50 +181,47 @@ export class CommandService {
   async models(sessionId: string): Promise<SessionModelsView> {
     const client = this.requireClient();
     const raw = await client.call<RawModelCatalog>("session/modelCatalog", {});
-    let current:
-      | { provider: string; model: string; reasoningEffort?: string }
-      | null = {
-      provider: raw.default.provider,
-      model: raw.default.model,
-      ...(raw.default.reasoningEffort === undefined
-        ? {}
-        : { reasoningEffort: raw.default.reasoningEffort }),
-    };
-    const result: SessionModelsView = {
-      current,
-      routable: raw.routableProviders.length > 0 ? true : null,
-      groups: raw.groups.map((g) => ({
-        id: g.id,
-        name: g.name,
-        models: g.models.map((m) => ({
-          id: m.id,
-          name: m.name,
-          ...(m.description === undefined
-            ? {}
-            : { description: m.description }),
-          ...(m.reasoning === undefined
-            ? {}
-            : {
-                reasoning: {
-                  efforts: m.reasoning.efforts,
-                  ...(m.reasoning.defaultEffort === undefined
-                    ? {}
-                    : { defaultEffort: m.reasoning.defaultEffort }),
-                },
-              }),
-        })),
+    let current: { provider: string; model: string; reasoningEffort?: string } =
+      {
+        provider: raw.default.provider,
+        model: raw.default.model,
+        ...(raw.default.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: raw.default.reasoningEffort }),
+      };
+    const groups = raw.groups.map((g) => ({
+      id: g.id,
+      name: g.name,
+      models: g.models.map((m) => ({
+        id: m.id,
+        name: m.name,
+        ...(m.description === undefined
+          ? {}
+          : { description: m.description }),
+        ...(m.reasoning === undefined
+          ? {}
+          : {
+              reasoning: {
+                efforts: m.reasoning.efforts,
+                ...(m.reasoning.defaultEffort === undefined
+                  ? {}
+                  : { defaultEffort: m.reasoning.defaultEffort }),
+              },
+            }),
       })),
-      failures: (raw.failures ?? []).map((f) => ({
-        id: f.id,
-        name: f.name,
-        message: f.message,
-      })),
-      error: null,
-    };
+    }));
+    const failures = (raw.failures ?? []).map((f) => ({
+      id: f.id,
+      name: f.name,
+      message: f.message,
+    }));
     try {
       // 0.1.2 起没有 per-session 的 models RPC；会话当前选择来自
-      // session/list 的 projections.modelSelection.lastUsed（投影缺席 → 回落
-      // catalog 默认）。
+      // session/list 的 projections.modelSelection（投影缺席 → 回落
+      // catalog 默认）。wire view 形如 { lastUsed, next: pending ?? lastUsed }：
+      // 新选择只进 pending（next），lastUsed 要等真实 LLM 请求发出才前进，
+      // 席位必须读 next 才能即时反映刚选的模型；旧网关（view 无 next 字段）
+      // 回落 lastUsed。
       const { items } = await client.call<{ items: SessionSummary[] }>(
         "session/list",
         { _request: {} },
@@ -215,35 +233,35 @@ export class CommandService {
             projections?: {
               values?: {
                 modelSelection?: {
-                  lastUsed?: {
-                    provider: string;
-                    model: string;
-                    reasoningEffort?: string;
-                  } | null;
-                };
+                  lastUsed?: unknown;
+                  next?: unknown;
+                } | null;
               };
             };
           }
         | undefined;
-      const lastUsed = row?.projections?.values?.modelSelection?.lastUsed;
-      if (lastUsed !== null && lastUsed !== undefined) {
-        current = {
-          provider: lastUsed.provider,
-          model: lastUsed.model,
-          ...(lastUsed.reasoningEffort === undefined
-            ? {}
-            : { reasoningEffort: lastUsed.reasoningEffort }),
-        };
-        result.current = current;
-      }
+      const selection = row?.projections?.values?.modelSelection;
+      const chosen =
+        narrowModelRef(selection?.next) ??
+        narrowModelRef(selection?.lastUsed);
+      if (chosen !== null) current = chosen;
     } catch (error) {
       // 会话未知（尚未落库）→ 保留 catalog 默认。仅吞业务错误
       // (DshRpcError)；传输故障（网络/超时/服务器不可达）向上传播，
       // 避免静默显示错误模型。
-      if (error instanceof DshRpcError) return result;
-      throw error;
+      if (!(error instanceof DshRpcError)) throw error;
     }
-    return result;
+    // routable 对齐 web 端（dsh-client-ui-model-selection）：按**当前选择**
+    // 的 provider 是否有可用 adapter 判定，驱动“当前模型不可用”横幅；
+    // 旧实现 `routableProviders.length > 0` 把任一 provider 可用误判为
+    // 当前 provider 可用。
+    return {
+      current,
+      routable: raw.routableProviders.includes(current.provider),
+      groups,
+      failures,
+      error: null,
+    };
   }
 
   /** session.selectModel（/model 选中 / 席位切换；effort 缺席 = 回落模型默认）。 */

@@ -137,13 +137,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
     // M4b: projection change (selected session only; key-filtered so a
     // non-todos/permissions/usage-stats projection does not re-post the plan
-    // strip, the permission seat, or the usage chip).
+    // strip, the permission seat, or the usage chip). modelSelection 更新
+    // 模型席位：web 端（或其他入口）切模型 → model/selection 投影帧 →
+    // 重拉目录，使席位 current 与 web 同步（web→扩展方向；扩展→web 由
+    // selectModel 的投影帧自动回传）。
     projections.on("change", (sessionId: string, key: string) => {
       if (sessionId !== this.selectedSessionId) return;
       if (key === "todos") this.postTodos(sessionId);
       else if (key === "permissions") this.postPermissions(sessionId);
       else if ((USAGE_STATS_KEYS as readonly string[]).includes(key))
         this.postStats(sessionId);
+      else if (key === "modelSelection") this.refreshModelSeat(sessionId);
     });
   }
 
@@ -1269,7 +1273,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
       return;
     }
-    if (this.modelInFlight.has(sessionId)) return;
+    if (this.modelInFlight.has(sessionId)) {
+      // 同一 resolved session 的并发选择（如两个 composer 槽映射同一会话时
+      // 连点）：首个请求仍在途，本请求直接放弃。必须结算本次请求，否则
+      // webview 的 operationsBySession 永挂 model 状态（modelSubmitting=true
+      // → 提交按钮永久 disabled）。failed+text 由 webview 自动落到错误提示。
+      this.post({
+        type: "composerOperation",
+        sourceSessionId,
+        sessionId,
+        requestId,
+        operation: "model",
+        status: "failed",
+        text: "模型切换进行中，请稍候重试",
+      });
+      return;
+    }
     this.modelInFlight.add(sessionId);
     try {
       await this.commands.selectModel(sessionId, provider, model, effort);
@@ -1338,6 +1357,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         },
       });
     }
+  }
+
+  /** modelSelection 投影帧到达 → 重拉席位目录（web→扩展同步）。
+   *  投影值缺席/形状不符（modelSelectionOf null）时跳过：空 seed 与损坏
+   *  帧无需触发额外的 modelCatalog + session/list 往返。 */
+  private refreshModelSeat(sessionId: string): void {
+    if (this.projections.modelSelectionOf(sessionId) === null) return;
+    void this.refreshModels(sessionId);
   }
 
   /** /permission 弹出层打开 → 解析会话并加载 permissions 投影（空/未绑定会话可用）。

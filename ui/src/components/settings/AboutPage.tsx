@@ -144,8 +144,18 @@ export function AboutPage({ panel, wire, onOpenInBrowser }: AboutPageProps) {
               尝试重启
             </button>
           </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded-xs border border-border-panel px-2.5 py-1.5 text-xs text-error hover:bg-list-hover"
+              onClick={() => { wire.stopDsh() }}
+            >
+              关闭当前 dsh，并不再重启
+            </button>
+          </div>
           <span className="text-xs text-description">
-            「尝试重连」只重建本窗口的连接，不动 dsh 进程；「尝试重启」会停掉并重新拉起 dsh。
+            「尝试重连」只重建本窗口的连接，不动 dsh 进程；「尝试重启」会停掉并重新拉起 dsh；
+            「关闭当前 dsh」会停掉服务并把「断连后自动重启」置为关，直到你手动改回。
           </span>
         </Row>
 

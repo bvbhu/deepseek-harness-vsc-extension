@@ -39,6 +39,8 @@ export interface SettingsWire {
   restartDsh(): void;
   /** 仅重连：不动 dsh 进程，只重建本窗口的 mux 传输。 */
   reconnectDsh(): void;
+  /** 关闭当前 dsh，并把「断连后自动重启」置为 false（不再被自动拉起）。 */
+  stopDsh(): void;
   /** 关于页「repo 链接」→ 扩展侧在系统浏览器打开指定 URL。 */
   openExternalUrl(url: string): void;
 }

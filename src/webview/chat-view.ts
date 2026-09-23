@@ -123,6 +123,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly pickDshPath: () => Promise<void>,
     private readonly restartDsh: () => Promise<void>,
     private readonly reconnectDsh: () => Promise<void>,
+    private readonly stopDsh: () => Promise<void>,
     private readonly extensionUri: vscode.Uri,
     private readonly extensionId: string,
   ) {
@@ -540,6 +541,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case "settingsReconnectDsh":
         await this.reconnectDsh();
+        break;
+      case "settingsStopDsh":
+        await this.stopDsh();
         break;
       case "openSettingsYaml":
         await this.serveOpenSettingsYaml();

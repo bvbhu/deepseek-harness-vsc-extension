@@ -360,6 +360,7 @@ export default function App() {
     pickDshPath: () => post({ type: 'settingsPickDshPath' }),
     restartDsh: () => post({ type: 'settingsRestartDsh' }),
     reconnectDsh: () => post({ type: 'settingsReconnectDsh' }),
+    stopDsh: () => post({ type: 'settingsStopDsh' }),
     openExternalUrl: (url) => post({ type: 'openExternalUrl', url }),
   }), [post, requestReply])
 

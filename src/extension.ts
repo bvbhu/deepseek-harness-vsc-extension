@@ -220,6 +220,30 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  /**
+   * 关于页「关闭当前 dsh，并不再重启」：停掉服务，并把 weinibuliu.dsh-vsc.autoRestart
+   * 一并写成 false —— 只停不停留开关的话，下次断连仍会被自动重启拉起来。
+   * 写入的是用户级设置（该键为 machine scope），改完立即作用于当前实例。
+   */
+  const stopDsh = async (): Promise<void> => {
+    try {
+      await dsh.stop();
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `关闭 dsh 失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    dsh.setAutoRestart(false);
+    await config.update(
+      "autoRestart",
+      false,
+      vscode.ConfigurationTarget.Global,
+    );
+    log("[settings] 已关闭当前 dsh，并将「断连后自动重启」置为 false");
+    if (provider.settingsOpen) void provider.refreshSettings();
+  };
+
   // M3/M3b: @ 引用服务 —— vscode API 全部在此注入（D3/D10：原生 picking 由扩展侧接管）。
   const atRef = new AtRefService({
     workspaceRoot: () =>
@@ -377,6 +401,7 @@ export function activate(context: vscode.ExtensionContext): void {
     pickDshPath,
     restartDsh,
     reconnectDsh,
+    stopDsh,
     context.extensionUri,
     context.extension.id,
   );

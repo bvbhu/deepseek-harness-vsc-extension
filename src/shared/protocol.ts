@@ -253,6 +253,8 @@ export type WebviewToExtensionMessage =
   | { type: "settingsRestartDsh" }
   // 关于页「尝试重连」：只重建本窗口的 mux 传输，不重启 dsh 进程。
   | { type: "settingsReconnectDsh" }
+  // 关于页「关闭当前 dsh，并不再重启」：停掉服务 + 关掉断连自动重启开关。
+  | { type: "settingsStopDsh" }
   // M6: 页脚「编辑 settings.yaml」→ 扩展侧在当前 VS Code 窗口打开该文件。
   | { type: "openSettingsYaml" }
   // M6: 关于页「打开扩展设置」→ VS Code Settings，并过滤到本扩展贡献的设置。

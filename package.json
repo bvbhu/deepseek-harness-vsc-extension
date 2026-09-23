@@ -2,7 +2,7 @@
   "name": "dsh-vsc",
   "displayName": "DeepSeek Harness",
   "description": "DeepSeek Harness(dsh) for VS Code",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "publisher": "bvbhu",
   "contributors": [
     { "name": "不留", "github": "weinibuliu" },
@@ -61,13 +61,27 @@
           "group": "navigation"
         }
       ],
-      "commandPalette": [
-        {
-          "when": "false",
-          "command": "weinibuliu.dsh-vsc.focus.from-editor"
-        }
-      ]
-    },
+ "commandPalette": [
+  {
+   "when": "false",
+   "command": "weinibuliu.dsh-vsc.focus.from-editor"
+  }
+ ],
+ "editor/context": [
+  {
+   "command": "weinibuliu.dsh-vsc.addSelectionToChat",
+   "when": "editorTextFocus",
+   "group": "9_dsh"
+  }
+ ],
+ "explorer/context": [
+  {
+   "command": "weinibuliu.dsh-vsc.addSelectionToChat",
+   "when": "resourceScheme == file && !explorerResourceIsFolder",
+   "group": "9_dsh"
+  }
+ ]
+},
     "commands": [
       {
         "command": "weinibuliu.dsh-vsc.focus",
@@ -93,6 +107,11 @@
       {
         "command": "weinibuliu.dsh-vsc.repromptAuth",
         "title": "dsh: 重新提示外部 dsh 认证（清除 Esc 跳过记忆）"
+      },
+      {
+        "command": "weinibuliu.dsh-vsc.addSelectionToChat",
+        "title": "dsh: 添加到对话（文件 + 行号）",
+        "category": "DeepSeek Harness"
       }
     ],
     "configuration": {

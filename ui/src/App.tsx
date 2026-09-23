@@ -169,6 +169,19 @@ export default function App() {
         case 'fileIndex':
           setFileIndex(new Set(message.files))
           break
+        case 'composerInsert': {
+          // 右键菜单「添加到对话」：把引用文本追加到目标会话草稿末尾。
+          // sessionId 由扩展侧按当前选中会话下发，避免依赖 webview 的闭包快照。
+          const key = composerKey(message.sessionId)
+          setComposerKeys((prev) => prev.includes(key) ? prev : [...prev, key])
+          setDrafts((prev) => {
+            const draft = prev[key] ?? ''
+            // 草稿非空且不以空白结尾时补一个空格，避免粘进上一个词里。
+            const gap = draft.length > 0 && !/\s$/u.test(draft) ? ' ' : ''
+            return { ...prev, [key]: `${draft}${gap}${message.text} ` }
+          })
+          break
+        }
         case 'sessions':
           setSessions(message.items ?? [])
           break

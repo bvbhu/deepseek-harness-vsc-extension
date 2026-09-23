@@ -18,6 +18,10 @@ export type ExtensionToWebviewMessage =
   // assistant markdown 渲染（ADR-0004）：工作区真实文件相对路径集（posix），供
   // 行内代码 token 的文件提及判定（settled-only）；超保险丝时为空数组（禁用提及）。
   | { type: "fileIndex"; files: string[] }
+  // 右键菜单「添加到对话」：把构造好的引用文本（@路径 + 行号提示）追加到
+  // 当前 composer 草稿末尾并聚焦。与 atInsert 不同：后者绑定 @ 菜单的触发
+  // token span，无法用于菜单触发的外部插入。
+  | { type: "composerInsert"; sessionId: string | null; text: string }
   | { type: "sessions"; items: SessionSummary[] }
   | { type: "selectedSession"; sessionId: string | null; navigationId?: number }
   | { type: "conversation"; sessionId: string; snapshot: ConversationSnapshot }

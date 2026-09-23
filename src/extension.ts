@@ -455,10 +455,67 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  /**
+   * 右键菜单「添加到对话」：把 文件 + 行号 追加到 composer 草稿。
+   * 编辑器内右键 → 带选区行号（空选区取光标所在行）；资源管理器右键 → 只带路径。
+   * 行号不并进 @ token（`@path:12-34` 无法解析为文件引用），而是作为紧跟其后的
+   * 纯文本提示，这样 @ 引用照旧可读文件，模型同时看到行号范围。
+   */
+  const addSelectionToChat = async (uri?: vscode.Uri): Promise<void> => {
+    const editor = vscode.window.activeTextEditor;
+    let filePath: string | null = null;
+    let startLine = 0;
+    let endLine = 0;
+
+    if (uri instanceof vscode.Uri) {
+      filePath = uri.fsPath;
+    } else if (editor !== undefined) {
+      filePath = editor.document.uri.fsPath;
+      startLine = editor.selection.start.line + 1;
+      endLine = editor.selection.end.line + 1;
+      // 整行选中（shift+↓ 等）时 VS Code 把 end 放在下一行行首，回退一行。
+      if (
+        endLine > startLine &&
+        editor.selection.end.character === 0 &&
+        editor.selection.isEmpty === false
+      )
+        endLine -= 1;
+    }
+
+    if (filePath === null) {
+      void vscode.window.showWarningMessage("dsh：没有可添加的文件");
+      return;
+    }
+
+    // 工作区内取相对路径，区外回落绝对路径（与 @ 引用的基准策略一致）。
+    const display = vscode.workspace
+      .asRelativePath(filePath)
+      .replace(/\\/gu, "/");
+    const lines =
+      startLine === 0
+        ? ""
+        : startLine === endLine
+          ? ` L${String(startLine)}`
+          : ` L${String(startLine)}-${String(endLine)}`;
+    const text = `@${display}${lines}`;
+
+    await vscode.commands.executeCommand("weinibuliu.dsh-vsc.focus");
+    provider.post({
+      type: "composerInsert",
+      sessionId: provider.selectedSessionId,
+      text,
+    });
+    log(`[command] 添加到对话: ${text}`);
+  };
+
   context.subscriptions.push(
     vscode.commands.registerCommand("weinibuliu.dsh-vsc.focus", async () => {
       await vscode.commands.executeCommand("weinibuliu-dsh-vsc.chat.focus");
     }),
+    vscode.commands.registerCommand(
+      "weinibuliu.dsh-vsc.addSelectionToChat",
+      addSelectionToChat,
+    ),
     vscode.commands.registerCommand(
       "weinibuliu.dsh-vsc.focus.from-editor",
       async () => {

@@ -41,7 +41,14 @@ npx @deepseek-ai/dsh
 > [!NOTE]
 > Due to the possibility of breaking changes to DeepSeek Harness, this extension may only run with a specific version of `dsh`.
 >
-> **Tested dsh version: `0.1.2-rc.1`** (since extension `0.1.15`).
+> **Tested dsh version: `0.1.7-rc.1`** (since extension `0.1.16`).
+>
+> Since `0.1.16` the extension speaks Session log V4 (the `0.1.7` line): live assistant
+> text now arrives on `session/follow`'s `assistant-stream` frames (which require an
+> explicit `assistantStream` opt-in on the follow request), `tool/result` results are
+> first-class messages carrying `toolCallId` / `isError` at the top level, and a new
+> `assistant/attempt` settlement event retires failed or retried attempts. Logs and
+> events from older versions (`0.1.2` – `0.1.6`) still replay correctly.
 
 ## Development
 

@@ -12,12 +12,25 @@
  * events the fold already understands (live follow frames are already raw
  * `assistant/chunk` events and need no unpacking).
  *
+ * 0.1.7 (Session 日志 V4) changed both halves of that story:
+ *   - snapshot records are only `{type:'event', event}`（`chunks` 记录消失），
+ *     仍存活的 attempt 改由 `assistantStream.activeAttempt` 提供 compact 前缀；
+ *   - 实时正文不再以 `assistant/chunk` 事件出现，而是 follow 自己的
+ *     `{type:'assistant-stream'}` 帧，且必须显式 `assistantStream: true` 才会收到。
+ * 两条都由 AssistantStreamJournal 折成合成 `assistant/chunk` 事件喂给同一个 fold
+ * （见 conversation/assistant-stream.ts）。`chunkrow/*` 解包保留给旧日志。
+ *
  * M4b: the follow snapshot's `projections` block is forwarded through the
  * optional `onProjections` callback so the ProjectionService can seed its
  * store from the same single call.
  */
 
 import { EventEmitter } from "node:events";
+import {
+  AssistantStreamJournal,
+  type AssistantStreamBaseline,
+  type AssistantStreamFrame,
+} from "../conversation/assistant-stream.ts";
 import {
   ConversationFold,
   type WireSessionEvent,
@@ -46,6 +59,10 @@ interface TrackedSession {
   cursor: number;
   /** Dispose the live follow stream on detach/re-attach. */
   disposeFollow?: () => void;
+  /** 0.1.7+ assistant 流折叠器（快照基线 + follow 帧 → 合成 chunk 事件）。 */
+  journal: AssistantStreamJournal;
+  /** assistant 流序号跳空后正在重取快照（防重复重启 follow）。 */
+  rebaselining?: boolean;
 }
 
 /** Rebuild a fold from an ordered, seq-deduped event list (replay determinism). */
@@ -53,6 +70,28 @@ function buildFold(events: WireSessionEvent[]): ConversationFold {
   const fold = new ConversationFold();
   for (const event of events) fold.apply(event);
   return fold;
+}
+
+/**
+ * Rebuild a fold and re-apply the still-live attempt's synthetic stream events.
+ * Any rebuild (loadOlder, re-attach) would otherwise drop the in-flight partial
+ * the journal is holding; the reference client keeps those transient rows in its
+ * visible window for the same reason.
+ */
+function buildFoldWithTransient(
+  events: WireSessionEvent[],
+  journal: AssistantStreamJournal,
+): ConversationFold {
+  const fold = buildFold(events);
+  for (const event of journal.transientEvents()) fold.apply(event);
+  return fold;
+}
+
+/** source 以可读 record 呈现；否则 null（与 fold 内的同名助手同义）。 */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /** Merge event lists into one ascending, seq-deduped list (first wins per seq). */
@@ -103,7 +142,12 @@ function unpackChunkRun(
   });
 }
 
-/** Unpack a session/page or session/follow snapshot's records into fold events. */
+/**
+ * Unpack a session/page or session/follow snapshot's records into fold events.
+ * 0.1.7+：records 只有 `{type:'event', event}`——`chunks` 紧凑 run 随 V4 消失
+ * （在飞 attempt 改由快照 assistantStream 基线给出，见 assistant-stream.ts）。
+ * 旧日志的 `chunks` 记录仍解包，供 0.1.6- 历史回放。
+ */
 function unpackRecords(records: unknown[]): WireSessionEvent[] {
   const out: WireSessionEvent[] = [];
   for (const record of records) {
@@ -183,7 +227,14 @@ export class ConversationService extends EventEmitter {
 
       const dispose = client.openStream(
         "session/follow",
-        { request: { address: { kind: "session", sessionId } } },
+        {
+          request: {
+            address: { kind: "session", sessionId },
+            // 0.1.7+：不显式开启就拿不到 assistant 实时帧（正文会一直空着）。
+            // 旧版本忽略未知字段，因此这是一条向后兼容的请求。
+            assistantStream: true,
+          },
+        },
         {
           onItem: (value) => {
             const row = value as
@@ -193,7 +244,9 @@ export class ConversationService extends EventEmitter {
                   records?: unknown[];
                   hasMore?: boolean;
                   projections?: unknown;
+                  assistantStream?: unknown;
                   event?: WireSessionEvent;
+                  frame?: unknown;
                 }
               | undefined;
             if (row?.type === "snapshot") {
@@ -209,13 +262,23 @@ export class ConversationService extends EventEmitter {
                 events,
                 buffered.splice(0),
               ]);
+              // 0.1.7+ 的在飞 attempt 由基线给出（compact 前缀 + nextIndex）：
+              // 采用后即可继续从下一条 delta 续写，无需自己重建 chunk 流。
+              const journal = new AssistantStreamJournal();
+              for (const event of merged) journal.observeDurableSeq(event.seq);
+              const synthetic = journal.adoptBaseline(
+                row.assistantStream as AssistantStreamBaseline | undefined,
+              );
+              const fold = buildFold(merged);
+              for (const event of synthetic) fold.apply(event);
               const tracked: TrackedSession = {
-                fold: buildFold(merged),
+                fold,
                 events: merged,
                 hasMore: row.hasMore === true,
                 loadingOlder: false,
                 cursor: typeof row.cursor === "number" ? row.cursor : -1,
                 disposeFollow: dispose,
+                journal,
               };
               this.tracked.set(sessionId, tracked);
               // 快照已应用：清除 pending 缓冲。attach 入口曾将 sessionId 放入
@@ -226,6 +289,10 @@ export class ConversationService extends EventEmitter {
               this.emit("change", sessionId);
               finish(this.snapshot(sessionId) as ConversationSnapshot);
               return; // stream stays open for live frames
+            }
+            if (row?.type === "assistant-stream") {
+              this.acceptStreamFrame(sessionId, row.frame as AssistantStreamFrame);
+              return;
             }
             if (row?.type === "event" && row.event) {
               this.applyLiveEvent(sessionId, row.event);
@@ -272,7 +339,7 @@ export class ConversationService extends EventEmitter {
       const events = unpackRecords(page.records);
       const target = this.tracked.get(sessionId) ?? initial;
       target.events = mergeEvents([events, target.events]);
-      target.fold = buildFold(target.events);
+      target.fold = buildFoldWithTransient(target.events, target.journal);
       target.hasMore = page.hasMore;
       this.emit("change", sessionId);
       return this.snapshot(sessionId) as ConversationSnapshot;
@@ -354,6 +421,15 @@ export class ConversationService extends EventEmitter {
     }
     const tracked = this.tracked.get(sessionId);
     if (!tracked) return; // unattached session: follow snapshot will cover it
+    tracked.journal.observeDurableSeq(event.seq);
+    // 结算事件可能赶在 end 帧之前（或 end 帧随重连丢失）：同步清掉活动 attempt，
+    // 否则下一条 start 帧会被误判成序号跳空。
+    const data = asRecord(event.data);
+    tracked.journal.settleDurable(
+      event.type,
+      data === null ? undefined : data["turn"],
+      data === null ? undefined : data["step"],
+    );
     if (tracked.fold.applyIfNewer(event)) {
       tracked.events.push(event);
       this.emit("change", sessionId);
@@ -364,6 +440,33 @@ export class ConversationService extends EventEmitter {
     if (event.type === "turn/end" || event.type === "turn/start") {
       this.emit("turnBoundary", sessionId);
     }
+  }
+
+  /**
+   * Fold one follow `assistant-stream` frame (0.1.7+). A skipped frame index or
+   * revision means the local window is no longer gap-free: restart the follow
+   * stream so a fresh snapshot + baseline replaces it (the reference client calls
+   * this a rebaseline).
+   */
+  private acceptStreamFrame(
+    sessionId: string,
+    frame: AssistantStreamFrame,
+  ): void {
+    const tracked = this.tracked.get(sessionId);
+    if (tracked === undefined) return;
+    if (frame === null || typeof frame !== "object") return;
+    const decision = tracked.journal.acceptFrame(frame);
+    if (decision === null) return;
+    if (decision.kind === "rebaseline") {
+      if (tracked.rebaselining === true) return;
+      tracked.rebaselining = true;
+      void this.attach(sessionId).catch(() => undefined);
+      return;
+    }
+    let changed = false;
+    for (const event of decision.events)
+      if (tracked.fold.applyIfNewer(event)) changed = true;
+    if (changed) this.emit("change", sessionId);
   }
 
   private requireClient(): WireClient {

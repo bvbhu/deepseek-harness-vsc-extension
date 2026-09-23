@@ -22,6 +22,17 @@
  * mirroring the command node (a result with no in-window call still builds
  * a card with name/args null). Step/todo events stay skipped without
  * breaking the fold; a later milestone renders them.
+ *
+ * 0.1.7 (Session 日志 V4) 的对照改动：
+ *   - `assistant/chunk` 会话事件消失。本 fold 的该分支从此只由
+ *     `AssistantStreamJournal` 产出的合成事件喂入（seq 取小数，落在持久水位与
+ *     下一个持久事件之间），与 0.1.6 的流式路径共用同一段折叠逻辑。
+ *   - `tool/result` 升为一等 `ToolResultMessage`：`toolCallId` / `isError` 移到
+ *     message 顶层、`content` 直接就是结果块。两种形状都读（见 toolResultText /
+ *     toolResultCallId / toolResultFailed），否则工具卡片无法与 tool/call 配对。
+ *   - 新增 `assistant/attempt`（失败/重试 attempt，不含 message）：退休流式占位，
+ *     不落节点。
+ *   - `turn/end` 原因扩到 blocked / max-tokens / interrupted。
  */
 
 import type {
@@ -38,6 +49,7 @@ import type {
   TurnEndKind,
   WriteChangeView,
 } from "../shared/protocol.ts";
+import type { StreamChunk } from "./assistant-stream.ts";
 
 /** Structural mirror of dsh-session's SessionEvent (data stays untyped here). */
 export interface WireSessionEvent {
@@ -48,21 +60,11 @@ export interface WireSessionEvent {
   ignorable?: true;
 }
 
-/** Structural mirror of dsh-llm's StreamChunk (the variants the fold reads). */
-type StreamChunk =
-  | { type: "block-start"; index: number; blockType: string }
-  | { type: "text-delta"; index: number; text: string }
-  | { type: "reasoning-delta"; index: number; text: string }
-  | {
-      type: "tool-call-delta";
-      index: number;
-      id: string;
-      name?: string;
-      argumentsDelta: string;
-    }
-  | { type: "block-end"; index: number; block: { type: string; text?: string } }
-  | { type: "usage"; usage: unknown }
-  | { type: "finish"; reason: unknown };
+/**
+ * StreamChunk 的镜像住在 assistant-stream.ts：0.1.7（Session 日志 V4）起
+ * `assistant/chunk` 不再落日志，实时 delta 只从 follow 的 assistant 帧来，
+ * 两条路径必须读同一份 chunk 形状。
+ */
 
 /** Structural mirror of dsh-llm's ContentBlock, narrowed to what M2 renders. */
 type ContentBlock =
@@ -109,10 +111,21 @@ interface ToolCallData {
   arguments: string;
 }
 
-/** tool/result 事件载荷（message.content[0] 为 tool-result 块，携带 toolCallId）。 */
+/**
+ * tool/result 事件载荷（dsh-session types）。
+ *
+ * 0.1.7（Session 日志 V4）把工具结果升为一等 `ToolResultMessage`：`toolCallId`
+ * 与 `isError` 在 message 顶层，`content` 直接就是结果内容块。
+ * 旧日志（0.1.6-）的 message.content[0] 是一条 `tool-result` 信封块，callId
+ * 与结果块都挂在它里面。两种形状都要读，否则工具卡片无法与 tool/call 配对。
+ */
 interface ToolResultData {
-  message?: { content?: ContentBlock[] };
-  error?: { name: string; code: string };
+  message?: {
+    content?: ContentBlock[];
+    toolCallId?: string;
+    isError?: boolean;
+  };
+  error?: { name: string; code: string; reason?: string };
   /** 工具私有展示载荷（dsh-tool-fs 的 presentationMeta 持久化；read 携带窗口、write 携带 diffs）。 */
   meta?: unknown;
 }
@@ -397,13 +410,24 @@ function parseContextBody(
   }
 }
 
-/** tool/result 的模型面结果文本（tool-result 块内嵌 content 的 text 提取）。 */
+/**
+ * tool/result 的模型面结果文本。
+ * V4：`message.content` 直接是结果内容块；旧日志：content[0] 是 `tool-result`
+ * 信封块，结果块嵌在它的 `content` 里。两种形状都读，未知形状回落空串。
+ */
 function toolResultText(message: ToolResultData["message"]): string {
-  const block = asRecord(message?.content?.[0]);
-  const nested = block === null ? undefined : block["content"];
-  if (!Array.isArray(nested)) return "";
+  const blocks = message?.content;
+  if (!Array.isArray(blocks)) return "";
+  const envelope = asRecord(blocks[0]);
+  const nested = envelope === null ? undefined : envelope["content"];
+  const source =
+    envelope !== null &&
+    envelope["type"] === "tool-result" &&
+    Array.isArray(nested)
+      ? nested
+      : blocks;
   let text = "";
-  for (const item of nested) {
+  for (const item of source) {
     const entry = asRecord(item);
     if (
       entry !== null &&
@@ -413,6 +437,29 @@ function toolResultText(message: ToolResultData["message"]): string {
       text += entry["text"];
   }
   return text;
+}
+
+/** tool/result 的目标 callId：V4 读 message 顶层，旧日志读 content[0] 信封块。 */
+function toolResultCallId(message: ToolResultData["message"]): string | null {
+  const record = asRecord(message);
+  if (record !== null) {
+    const direct = readString(record, "toolCallId");
+    if (direct !== null) return direct;
+  }
+  const envelope = asRecord(message?.content?.[0]);
+  return envelope === null ? null : readString(envelope, "toolCallId");
+}
+
+/** tool/result 的失败标记：V4 读 message.isError，旧日志读信封块，两条都看 data.error。 */
+function toolResultFailed(
+  message: ToolResultData["message"],
+  error: ToolResultData["error"],
+): boolean {
+  if (error !== undefined) return true;
+  const record = asRecord(message);
+  if (record !== null && record["isError"] === true) return true;
+  const envelope = asRecord(message?.content?.[0]);
+  return envelope !== null && envelope["isError"] === true;
 }
 
 // ---- M5: read/write 卡片摘要派生（全部来自 wire，live/replay 一致）----
@@ -748,6 +795,8 @@ export class ConversationFold {
         break;
       }
       case "assistant/chunk": {
+        // 0.1.6-：日志里的逐 delta 事件。0.1.7+：由 AssistantStreamJournal 从
+        // follow 的 assistant 帧合成（同样的 (turn, step, chunk) 形状）。
         const data = event.data as ChunkData;
         const chunk = data.chunk;
         if (
@@ -775,6 +824,16 @@ export class ConversationFold {
         this.revision++;
         break;
       }
+      case "assistant/attempt": {
+        // V4: 失败/重试/取消的 attempt 落成 assistant/attempt（不含 message，
+        // 不进派生历史）。流式占位到此为止——直接退休，不落任何节点，
+        // 对齐参考实现里 settlement 的 transient 退休语义。
+        const data = event.data as { turn?: number; step?: number };
+        if (typeof data.turn === "number" && typeof data.step === "number") {
+          if (this.closePartial(data.turn, data.step)) this.revision++;
+        }
+        break;
+      }
       case "turn/start":
         this.running = true;
         this.revision++;
@@ -784,6 +843,9 @@ export class ConversationFold {
         this.running = false;
         const reason = (event.data as TurnEndData).reason;
         let changed = wasRunning; // the running flip itself is a visible change
+        // 回合收尾而流式占位仍开着（中断/崩溃）：冻结占位文本，避免 partial 悬挂。
+        // completed 是正常收尾，结算事件自带正文，不动占位。
+        if (reason?.kind !== "completed") this.closePartial();
         if (reason?.kind === "aborted") {
           this.items.push({ kind: "note", text: "已中断" });
           changed = true;
@@ -792,6 +854,15 @@ export class ConversationFold {
             kind: "note",
             text: `出错：${reason.error?.message ?? reason.message ?? "未知错误"}`,
           });
+          changed = true;
+        } else if (reason?.kind === "blocked") {
+          this.items.push({ kind: "note", text: "已阻止" });
+          changed = true;
+        } else if (reason?.kind === "max-tokens") {
+          this.items.push({ kind: "note", text: "已达输出上限" });
+          changed = true;
+        } else if (reason?.kind === "interrupted") {
+          this.items.push({ kind: "note", text: "运行被中断" });
           changed = true;
         }
         if (changed) this.revision++;
@@ -873,13 +944,10 @@ export class ConversationFold {
       }
       case "tool/result": {
         const data = event.data as ToolResultData;
-        // tool-result 块内嵌在 message.content[0]：取出 callId 与结果文本。
-        const block = asRecord(data.message?.content?.[0]);
-        const callId = block === null ? null : readString(block, "toolCallId");
+        // callId 与结果文本：V4 在 message 顶层 / content 直出，旧日志在 content[0]。
+        const callId = toolResultCallId(data.message);
         const text = toolResultText(data.message);
-        const failed =
-          (block !== null && block["isError"] === true) ||
-          data.error !== undefined;
+        const failed = toolResultFailed(data.message, data.error);
         const errorText =
           data.error !== undefined
             ? `[${data.error.name}${data.error.code === undefined || data.error.code === "" ? "" : `/${data.error.code}`}] ${text}`
@@ -977,9 +1045,13 @@ export class ConversationFold {
     };
   }
 
-  /** Finish the open partial, keeping it as a streamed (partial) item. */
-  private closePartial(turn?: number, step?: number): void {
-    if (!this.open) return;
+  /**
+   * Finish the open partial, keeping it as a streamed (partial) item.
+   * @returns whether the visible surface changed (the settled partial was
+   *   replaced/removed rather than merely frozen).
+   */
+  private closePartial(turn?: number, step?: number): boolean {
+    if (!this.open) return false;
     const open = this.open;
     this.open = null;
     if (
@@ -992,8 +1064,10 @@ export class ConversationFold {
       // item; the caller appends the final one in its place.
       this.items.splice(open.itemIndex, 1);
       this.revision++;
+      return true;
     }
     // Otherwise the partial stays (a newer step or a user message began).
+    return false;
   }
 
   private ensureOpen(turn: number, step: number): void {

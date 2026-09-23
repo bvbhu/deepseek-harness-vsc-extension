@@ -11,6 +11,12 @@ node_modules
 .npmrc
 .github
 
+# 开发/调试产物（不得随扩展分发）
+tests/**
+.workbuddy/**
+scripts/**
+build-deploy.bat
+
 **/*.map
 **/*.ts
 

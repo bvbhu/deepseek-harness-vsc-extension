@@ -54,6 +54,8 @@ declare global {
 }
 
 const vscode = acquireVsCodeApi()
+// main.tsx 的全局错误上报经此把堆栈送回扩展输出面板（acquireVsCodeApi 全局只能调一次）。
+;(window as unknown as { __dshVscode?: VscodeApi }).__dshVscode = vscode
 const UNBOUND_COMPOSER = '__unbound__'
 const composerKey = (sessionId: string | null): string => sessionId ?? UNBOUND_COMPOSER
 

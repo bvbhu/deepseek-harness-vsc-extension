@@ -108,11 +108,18 @@ export function AboutPage({ panel, wire, onOpenInBrowser }: AboutPageProps) {
         </Row>
 
         <Row label="扩展运行时设置">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-description">配置 dsh</span>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-description">自动启动 dsh</span>
+              <span className="text-xs">{panel === null ? '—' : panel.autoStart ? '开' : '关'}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-description">断连后自动重启 dsh</span>
+              <span className="text-xs">{panel === null ? '—' : panel.autoRestart ? '开' : '关'}</span>
+            </div>
             <button
               type="button"
-              className="flex-none text-xs text-link hover:text-link-hover"
+              className="w-fit text-xs text-link hover:text-link-hover"
               onClick={() => { wire.openExtensionSettings() }}
             >
               打开 VS Code 设置
@@ -120,20 +127,26 @@ export function AboutPage({ panel, wire, onOpenInBrowser }: AboutPageProps) {
           </div>
         </Row>
 
-        <Row label="settings.yaml">
+        <Row label="服务控制">
           <div className="flex items-center gap-2">
-            <span className="break-all text-xs text-description">
-              {panel?.settingsYamlPath ?? ''}
-              {panel !== null && panel.hasDocument ? '（已存在）' : '（未创建）'}
-            </span>
             <button
               type="button"
-              className="flex-none text-xs text-link hover:text-link-hover"
-              onClick={() => { wire.openSettingsYaml() }}
+              className="rounded-xs border border-border-panel px-2.5 py-1.5 text-xs hover:bg-list-hover"
+              onClick={() => { wire.reconnectDsh() }}
             >
-              编辑
+              尝试重连
+            </button>
+            <button
+              type="button"
+              className="rounded-xs border border-border-panel px-2.5 py-1.5 text-xs hover:bg-list-hover"
+              onClick={() => { wire.restartDsh() }}
+            >
+              尝试重启
             </button>
           </div>
+          <span className="text-xs text-description">
+            「尝试重连」只重建本窗口的连接，不动 dsh 进程；「尝试重启」会停掉并重新拉起 dsh。
+          </span>
         </Row>
 
         <div>

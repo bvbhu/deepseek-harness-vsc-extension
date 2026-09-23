@@ -251,6 +251,8 @@ export type WebviewToExtensionMessage =
   | { type: "settingsPickDshPath" }
   // M6: 引导页「重试」：error 态重启 dsh 服务（不经文件选择器，沿用现有 launcher）。
   | { type: "settingsRestartDsh" }
+  // 关于页「尝试重连」：只重建本窗口的 mux 传输，不重启 dsh 进程。
+  | { type: "settingsReconnectDsh" }
   // M6: 页脚「编辑 settings.yaml」→ 扩展侧在当前 VS Code 窗口打开该文件。
   | { type: "openSettingsYaml" }
   // M6: 关于页「打开扩展设置」→ VS Code Settings，并过滤到本扩展贡献的设置。
@@ -810,6 +812,10 @@ export interface SettingsPanelView {
   permissionDefault?: PermissionDefaultView;
   /** 「通用」页繁忙时 Enter 键行为（ui-conversation namespace；缺席 = 回落 queue）。 */
   busyEnter?: BusyEnterView;
+  /** 扩展设置 weinibuliu.dsh-vsc.autoStart（打开窗口时自动启动 dsh）。 */
+  autoStart: boolean;
+  /** 扩展设置 weinibuliu.dsh-vsc.autoRestart（断连后自动重启 dsh）。 */
+  autoRestart: boolean;
 }
 
 /** host.describe 视图（dsh 包页：host 运行时事实）。 */

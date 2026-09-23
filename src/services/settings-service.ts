@@ -476,6 +476,8 @@ export class SettingsService {
       status: "ready", // 由 chat-view 覆写为真实状态
       location: { found: false }, // 由 chat-view 覆写
       settingsYamlPath: "", // 由 chat-view 覆写
+      autoStart: true, // 由 chat-view 覆写为 VS Code 设置的当前值
+      autoRestart: true, // 由 chat-view 覆写为 VS Code 设置的当前值
       hasDocument: describe.hasDocument,
       writable: describe.writable,
       rows: rows.map((row) => ({

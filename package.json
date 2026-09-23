@@ -2,7 +2,7 @@
   "name": "dsh-vsc",
   "displayName": "DeepSeek Harness",
   "description": "DeepSeek Harness(dsh) for VS Code",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "publisher": "bvbhu",
   "contributors": [
     { "name": "不留", "github": "weinibuliu" },
@@ -143,7 +143,17 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "description": "Resolve and connect to the global DSH runtime when a workspace window opens."
+          "description": "打开工作区窗口时自动解析并连接全局 DSH 运行时（自动启动 dsh）。关闭后需要手动点击「尝试重连」或「尝试重启」。",
+          "markdownDescription": "打开工作区窗口时自动解析并连接全局 DSH 运行时（**自动启动 dsh**）。\n\n关闭后扩展不会自行拉起 dsh，需要在「关于」页手动点击 **尝试重连** 或 **尝试重启**。",
+          "order": 10
+        },
+        "weinibuliu.dsh-vsc.autoRestart": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "连接反复断开后自动重启 dsh 服务以恢复。关闭后只会持续重连，不再重启 dsh。",
+          "markdownDescription": "连接反复断开（连续多次 WebSocket 掉线）后**自动重启 dsh 服务**以恢复。\n\n关闭后扩展只会持续重连同一实例，不再自行重启 dsh —— 适合排查外部实例或不想打断长任务的场景。",
+          "order": 11
         }
       }
     }

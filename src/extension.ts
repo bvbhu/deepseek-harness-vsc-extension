@@ -42,12 +42,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const discoveryPort = config.get<number>("discoveryPort", 3080);
   const managedPort = config.get<number>("managedPort", 3080);
   const autoStart = config.get<boolean>("autoStart", true);
+  // 断连后是否自动重启 dsh（关掉后只重连、不重启，便于排查外部实例）。
+  const autoRestart = config.get<boolean>("autoRestart", true);
 
   const dsh = new DshService({
     explicitPath,
     externalUrl,
     discoveryPort,
     managedPort,
+    autoRestart,
     globalStoragePath: context.globalStorageUri.fsPath,
     brokerScript: context.asAbsolutePath("dist/dsh-runtime-broker.js"),
     onStatus: (status: DshStatus, detail?: string) => {
@@ -118,6 +121,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const conversations = new ConversationService(
     () => dsh.client,
     (sessionId, block) => projections.seed(sessionId, block),
+    (line) => log(line),
   );
 
   // M4: pending 交互闭环（审批 / ask-user / plan-review）——帧→列表、应答/取消走
@@ -160,6 +164,11 @@ export function activate(context: vscode.ExtensionContext): void {
     reportedVersion: dsh.reportedVersionValue,
     settingsYamlPath: deriveSettingsYamlPath(),
     extensionVersion: context.extension.packageJSON.version as string,
+    // 关于页展示两个启停开关的当前值（设置项实时生效，故每次取最新配置）。
+    autoStart: vscode.workspace
+      .getConfiguration("weinibuliu.dsh-vsc")
+      .get<boolean>("autoStart", true),
+    autoRestart: dsh.autoRestartValue,
   });
 
   // M6: 引导页「选择 dsh 文件…」：全局实例的 launcher 只能使用机器级设置，
@@ -196,6 +205,17 @@ export function activate(context: vscode.ExtensionContext): void {
     } catch (error) {
       void vscode.window.showErrorMessage(
         `dsh 重启失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  // 关于页「尝试重连」：只重建本窗口的 mux 传输，不重启 dsh 进程。
+  const reconnectDsh = async (): Promise<void> => {
+    try {
+      await dsh.reconnect();
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `dsh 重连失败: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   };
@@ -356,6 +376,7 @@ export function activate(context: vscode.ExtensionContext): void {
     dshFacts,
     pickDshPath,
     restartDsh,
+    reconnectDsh,
     context.extensionUri,
     context.extension.id,
   );
@@ -368,6 +389,19 @@ export function activate(context: vscode.ExtensionContext): void {
         webviewOptions: { retainContextWhenHidden: true },
       },
     ),
+  );
+
+  // 设置项实时生效：断连后自动重启的开关改了立即作用于当前实例，无需重载窗口。
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration("weinibuliu.dsh-vsc")) return;
+      const next = vscode.workspace
+        .getConfiguration("weinibuliu.dsh-vsc")
+        .get<boolean>("autoRestart", true);
+      dsh.setAutoRestart(next);
+      log(`[settings] 断连后自动重启 dsh = ${String(next)}`);
+      if (provider.settingsOpen) void provider.refreshSettings();
+    }),
   );
 
   // 自动附带：活动编辑器 / 保存 / 文档变更 → 上送当前文件（composer 下方文件条）。

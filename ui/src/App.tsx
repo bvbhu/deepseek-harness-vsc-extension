@@ -355,11 +355,11 @@ export default function App() {
       requestReply((id) => post({ type: 'settingsSelectPermissionDefault', id, preset, expectedRevision })),
     selectBusyEnter: (behavior, expectedRevision) =>
       requestReply((id) => post({ type: 'settingsSelectBusyEnter', id, behavior, expectedRevision })),
-    openSettingsYaml: () => post({ type: 'openSettingsYaml' }),
     openExtensionSettings: () => post({ type: 'openExtensionSettings' }),
     refresh: () => post({ type: 'settingsRefresh' }),
     pickDshPath: () => post({ type: 'settingsPickDshPath' }),
     restartDsh: () => post({ type: 'settingsRestartDsh' }),
+    reconnectDsh: () => post({ type: 'settingsReconnectDsh' }),
     openExternalUrl: (url) => post({ type: 'openExternalUrl', url }),
   }), [post, requestReply])
 

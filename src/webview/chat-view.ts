@@ -62,6 +62,10 @@ export interface DshFacts {
   reportedVersion: string | null;
   settingsYamlPath: string;
   extensionVersion: string;
+  /** 扩展设置：打开窗口时自动启动 dsh。 */
+  autoStart: boolean;
+  /** 扩展设置：断连后自动重启 dsh。 */
+  autoRestart: boolean;
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -118,6 +122,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly dshFacts: () => DshFacts,
     private readonly pickDshPath: () => Promise<void>,
     private readonly restartDsh: () => Promise<void>,
+    private readonly reconnectDsh: () => Promise<void>,
     private readonly extensionUri: vscode.Uri,
     private readonly extensionId: string,
   ) {
@@ -532,6 +537,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case "settingsRestartDsh":
         await this.restartDsh();
+        break;
+      case "settingsReconnectDsh":
+        await this.reconnectDsh();
         break;
       case "openSettingsYaml":
         await this.serveOpenSettingsYaml();
@@ -1590,6 +1598,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           location,
           settingsYamlPath: facts.settingsYamlPath,
           extensionVersion: facts.extensionVersion,
+          autoStart: facts.autoStart,
+          autoRestart: facts.autoRestart,
         },
       });
     } catch (error) {
@@ -1605,6 +1615,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           location,
           settingsYamlPath: facts.settingsYamlPath,
           extensionVersion: facts.extensionVersion,
+          autoStart: facts.autoStart,
+          autoRestart: facts.autoRestart,
           hasDocument: false,
           writable: false,
           loadError: String(error),

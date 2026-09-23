@@ -54,6 +54,11 @@ export interface DshServiceOptions {
   externalUrl?: string | null;
   discoveryPort: number;
   managedPort: number;
+  /**
+   * 断连后是否自动重启 dsh 服务。false = 只持续重连同一实例，永不自行重启
+   * （排查外部实例 / 不想打断长任务时用）。可由 setAutoRestart 实时改写。
+   */
+  autoRestart?: boolean;
   globalStoragePath: string;
   brokerScript: string;
   onStatus?: (status: DshStatus, detail?: string) => void;
@@ -132,6 +137,8 @@ export class DshService extends EventEmitter {
   private restarting = false;
   private restartAttempts = 0;
   private explicitPath: string | null | undefined;
+  /** 断连后是否自动重启 dsh（默认 true；可由设置项实时改写）。 */
+  private autoRestart: boolean;
   private streamDisposers: Array<() => void> = [];
   /** Waterfall eventId → kind, so a `cancel` frame resolves the right entry. */
   private waterfallKinds = new Map<string, "approval" | "question">();
@@ -140,6 +147,17 @@ export class DshService extends EventEmitter {
     super();
     this.options = options;
     this.explicitPath = options.explicitPath;
+    this.autoRestart = options.autoRestart !== false;
+  }
+
+  /** 实时改写「断连后自动重启」（设置项变更免重启生效）。 */
+  setAutoRestart(value: boolean): void {
+    this.autoRestart = value !== false;
+  }
+
+  /** 当前是否已开启断连自动重启（设置页展示用）。 */
+  get autoRestartValue(): boolean {
+    return this.autoRestart;
   }
 
   /**
@@ -236,10 +254,39 @@ export class DshService extends EventEmitter {
     return this.reportedVersion;
   }
 
+  /** 完整重启：停掉 dsh（仅 Broker 可停 managed 子进程）后重新解析并连接。 */
   async restart(explicitPath?: string | null): Promise<void> {
     await this.stop();
     if (explicitPath !== undefined) this.explicitPath = explicitPath;
     await this.start();
+  }
+
+  /**
+   * 仅重连：不动 dsh 进程，只重建本窗口的 mux 传输并重走 $events 握手。
+   * 与 restart 的区别是保留连接目标（外部实例/已有进程都不会被重启），
+   * 适合「dsh 还在、只是我这边的连接断了」的场景。目标尚未解析时退回完整 start。
+   */
+  async reconnect(): Promise<void> {
+    this.reconnectFailures = 0;
+    if (!this.started || this.currentBaseUrl === null) {
+      await this.restart();
+      return;
+    }
+    this.options.onLog?.(
+      `手动重连：重建 ${this.currentBaseUrl} 的 mux 传输（不重启 dsh）`,
+    );
+    this.setStatus("reconnecting");
+    try {
+      this.generation += 1;
+      this.closeTransport();
+      await this.openGeneration();
+      this.setStatus("ready");
+    } catch (error) {
+      this.started = false;
+      const message = error instanceof Error ? error.message : String(error);
+      this.setStatus("error", message);
+      throw error;
+    }
   }
 
   private setStatus(status: DshStatus, detail?: string): void {
@@ -592,7 +639,7 @@ export class DshService extends EventEmitter {
         this.options.onNotice?.(
           `dsh 连接中断（code=${String(code)}），正在自动重连…`,
         );
-      } else if (nextFailure === RECONNECT_BEFORE_RESTART) {
+      } else if (nextFailure === RECONNECT_BEFORE_RESTART && this.autoRestart) {
         this.options.onNotice?.(
           `dsh 连接反复中断（已连续 ${String(nextFailure)} 次），` +
             "即将尝试重启 dsh 服务以恢复",
@@ -683,10 +730,18 @@ export class DshService extends EventEmitter {
 
   private onPhysicalDrop(): void {
     this.reconnectFailures += 1;
-    if (this.reconnectFailures >= RECONNECT_BEFORE_RESTART) {
-      this.reconnectFailures = 0;
-      void this.restartService();
+    if (this.reconnectFailures < RECONNECT_BEFORE_RESTART) return;
+    this.reconnectFailures = 0;
+    if (!this.autoRestart) {
+      // 手动模式：只重连、不重启 dsh。保持计数器归零以免无限累加，
+      // 并明确告知用户为什么没有重启（否则看起来像"卡住不动"）。
+      this.options.onLog?.(
+        `dsh 连接反复中断（已达 ${String(RECONNECT_BEFORE_RESTART)} 次阈值），` +
+          "但已关闭「断连后自动重启」：仅继续重连，未重启 dsh。可在「关于」页手动点击「尝试重启」。",
+      );
+      return;
     }
+    void this.restartService();
   }
 
   /** Translate one $events item (emit / waterfall / cancel) into legacy frames. */

@@ -876,7 +876,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (this._selectedSessionId !== null) return;
     const navigationId = ++this.navigationId;
     try {
-      const sessionId = await this.resolveComposerSession(null, []);
+      // 优先落在最近一个**有内容**的会话：listSessions 已滤掉 blank 并按
+      // updatedAt 倒序，第一条即最近的真实对话。此前这里无条件走
+      // resolveComposerSession（复用/新建 blank），冷启动总是落在一个空会话上，
+      // 看起来就像「对话加载出来就空了 / 消失了」。仅在列表不可用或确实没有
+      // 任何有内容的会话时，才退回原来的 blank 解析（新建会话供直接输入）。
+      let sessionId: string | null = null;
+      try {
+        const sessions = await this.sessions.listSessions(null);
+        sessionId = sessions[0]?.sessionId ?? null;
+      } catch {
+        sessionId = null; // 列表不可用（服务未就绪等）→ 走原有 blank 解析
+      }
+      if (sessionId === null) {
+        sessionId = await this.resolveComposerSession(null, []);
+      }
       if (
         navigationId !== this.navigationId ||
         this._selectedSessionId !== null

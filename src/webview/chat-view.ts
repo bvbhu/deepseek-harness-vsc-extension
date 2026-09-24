@@ -111,7 +111,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    *
    * 不拉它、直接把投影 `as PermissionSelectView`，`options` 就是 undefined，
    * webview 的 `PermissionSelect` 一渲染 `.filter` 就崩 → React 卸载整棵树 →
-   * 对话「一闪而过」。这里缓存一次，投影变更时失效重拉。
+   * 对话「一闪而过」。拉取成功后常驻缓存（catalog 为进程级、dsh 单次运行内
+   * 不可变，无需失效）；拉取失败则返回空数组且不缓存，下次自动重试。
    */
   private permissionCatalog: PresetOptionView[] | null = null;
 
@@ -165,10 +166,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // 模型席位：web 端（或其他入口）切模型 → model/selection 投影帧 →
     // 重拉目录，使席位 current 与 web 同步（web→扩展方向；扩展→web 由
     // selectModel 的投影帧自动回传）。
-    projections.on("change", (sessionId: string, key: string) => {
+    projections.on("change", async (sessionId: string, key: string) => {
       if (sessionId !== this.selectedSessionId) return;
       if (key === "todos") this.postTodos(sessionId);
-      else if (key === "permissions") this.postPermissions(sessionId);
+      else if (key === "permissions") await this.postPermissions(sessionId);
       else if ((USAGE_STATS_KEYS as readonly string[]).includes(key))
         this.postStats(sessionId);
       else if (key === "modelSelection") this.refreshModelSeat(sessionId);

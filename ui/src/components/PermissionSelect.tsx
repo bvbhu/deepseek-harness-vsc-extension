@@ -126,7 +126,10 @@ export function PermissionSelect({ value, onSelect, disabled }: PermissionSelect
 
   if (value === null) return null
 
-  const options = value.options.filter((option) => option.value !== 'custom')
+  // dsh 0.1.7 的 permissions 投影只含 currentValue，options 来自独立的
+  // permissionPresets/catalog RPC；扩展侧若未拉到（或形状不符）会传 undefined，
+  // 这里兜底成空数组避免 React 崩溃整树卸载。
+  const options = (value.options ?? []).filter((option) => option.value !== 'custom')
   const current = options.find((option) => option.value === value.currentValue)
   const currentLabel = current === undefined
     ? permissionLabel(value.currentValue, value.currentValue)

@@ -20,10 +20,13 @@ import type {
   BusyEnterBehavior,
   ComposerSubmitGesture,
   ExtensionToWebviewMessage,
+  PermissionSelectView,
+  PresetOptionView,
   SessionActivityView,
   SessionSummary,
   WebviewToExtensionMessage,
 } from "../shared/protocol.ts";
+import type { WireClient } from "../dsh/wire.ts";
 import type { SessionService } from "../services/session-service.ts";
 import type { ConversationService } from "../services/conversation-service.ts";
 import type { ProjectionService } from "../services/projection-service.ts";
@@ -98,6 +101,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private busyEnter: BusyEnterBehavior = "queue";
   /** ADR-0004: 已上送文件提及词表对应的工作区根（变化才重枚举）。 */
   private fileIndexWorkspacePath: string | null = null;
+  /**
+   * permissionPresets/catalog 的缓存（0.1.7 进程级权限预设目录）。
+   *
+   * `permissions` 会话投影**只含 `currentValue`**（dsh 官方
+   * `PermissionSelection` 接口实锤），可选项 `options` 来自**独立的**
+   * Typert Remote 方法 `permissionPresets/catalog`，返回
+   * `{ options, defaultOptions, defaultPreset }`（`PermissionCatalog`）。
+   *
+   * 不拉它、直接把投影 `as PermissionSelectView`，`options` 就是 undefined，
+   * webview 的 `PermissionSelect` 一渲染 `.filter` 就崩 → React 卸载整棵树 →
+   * 对话「一闪而过」。这里缓存一次，投影变更时失效重拉。
+   */
+  private permissionCatalog: PresetOptionView[] | null = null;
 
   /** 当前选中会话（extension.ts 的 commands/change 失效重拉用）。 */
   get selectedSessionId(): string | null {
@@ -119,6 +135,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly agentPresets: AgentPresetService,
     private readonly pendingInteractions: PendingInteractionService,
     private readonly settings: SettingsService,
+    /** dsh wire 句柄（拉 permissionPresets/catalog 用；null = 服务未就绪）。 */
+    private readonly wire: () => WireClient | null,
     private readonly dshFacts: () => DshFacts,
     private readonly pickDshPath: () => Promise<void>,
     private readonly restartDsh: () => Promise<void>,
@@ -723,7 +741,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.refreshComposerCatalogs(sessionId),
         this.conversations.seedProjections(sessionId),
       ]);
-      this.postPermissions(sessionId);
+      await this.postPermissions(sessionId);
       await this.refreshAgentPresets(sessionId);
     }
   }
@@ -861,7 +879,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       items: this.pendingInteractions.snapshot(sessionId),
     });
     this.postTodos(sessionId);
-    this.postPermissions(sessionId);
+    await this.postPermissions(sessionId);
     this.postStats(sessionId);
     await this.refreshComposerCatalogs(sessionId);
   }
@@ -1010,7 +1028,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: "conversation", sessionId, snapshot });
       // M4b: attach 已同步 seed 投影 store（决策 9 回调），补发 todo 计划条、权限席位与用量统计快照。
       this.postTodos(sessionId);
-      this.postPermissions(sessionId);
+      await this.postPermissions(sessionId);
       this.postStats(sessionId);
     } catch (error) {
       this.post({ type: "notice", text: String(error) });
@@ -1036,13 +1054,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** 上送某会话的 permissions 投影（null = 能力缺席 → 席位/弹出隐藏）。 */
-  private postPermissions(sessionId: string, requestId = 0): void {
+  private async postPermissions(sessionId: string, requestId = 0): Promise<void> {
     this.post({
       type: "permissions",
       sessionId,
       requestId,
-      permissions: this.projections.permissionsOf(sessionId),
+      permissions: await this.buildPermissionSelect(sessionId),
     });
+  }
+
+  /**
+   * 组装权限席位视图：dsh 0.1.7 的 `permissions` 投影只含 `currentValue`，
+   * 可选项 `options` 来自独立的 `permissionPresets/catalog` RPC（进程级
+   * 目录，与会话无关）。这里合并两者，使 `PermissionSelect` 有真实选项可
+   * 渲染；catalog 拉取失败时降级为 `options: []`（webview 侧再兜底 `?? []`）。
+   */
+  private async buildPermissionSelect(
+    sessionId: string,
+  ): Promise<PermissionSelectView | null> {
+    const projection = this.projections.permissionsOf(sessionId);
+    if (projection === null) return null;
+    const options = await this.ensurePermissionCatalog();
+    return { ...projection, options };
+  }
+
+  /** 拉取并缓存 permissionPresets/catalog；失败返回空数组（下次重试）。 */
+  private async ensurePermissionCatalog(): Promise<PresetOptionView[]> {
+    if (this.permissionCatalog !== null) return this.permissionCatalog;
+    const wire = this.wire();
+    if (wire === null) return [];
+    try {
+      const catalog = await wire.call<{
+        options?: PresetOptionView[];
+      }>("permissionPresets/catalog", {});
+      const options = Array.isArray(catalog?.options) ? catalog.options : [];
+      this.permissionCatalog = options;
+      return options;
+    } catch {
+      return [];
+    }
   }
 
   /** M3b: / 命令目录快照（契约跟随；available=false 时 webview 不呼出 / 菜单）。
@@ -1410,7 +1460,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: "permissions",
         sessionId: sourceSessionId,
         requestId,
-        permissions: this.projections.permissionsOf(sessionId),
+        permissions: await this.buildPermissionSelect(sessionId),
       });
     } catch (error) {
       this.post({

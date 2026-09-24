@@ -397,6 +397,7 @@ export function activate(context: vscode.ExtensionContext): void {
     agentPresets,
     pending,
     settings,
+    () => dsh.client,
     dshFacts,
     pickDshPath,
     restartDsh,
@@ -456,20 +457,35 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   /**
-   * 右键菜单「添加到对话」：把 文件 + 行号 追加到 composer 草稿。
-   * 编辑器内右键 → 带选区行号（空选区取光标所在行）；资源管理器右键 → 只带路径。
-   * 行号不并进 @ token（`@path:12-34` 无法解析为文件引用），而是作为紧跟其后的
-   * 纯文本提示，这样 @ 引用照旧可读文件，模型同时看到行号范围。
+   * dsh 当前启用的工作区根（= VS Code 工作区的第一个文件夹，与
+   * `ensureWorkspaceForWindow` 的绑定口径一致）。null = 未打开文件夹。
    */
-  const addSelectionToChat = async (uri?: vscode.Uri): Promise<void> => {
+  const dshWorkspaceRoot = (): string | null =>
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+
+  /**
+   * 解析右键目标文件的展示路径 + 行号范围。
+   *
+   * 路径基准是 **dsh 当前启用的工作区**（第一个文件夹），不是
+   * `getWorkspaceFolder` 的任意匹配：文件在该根目录之下 → 相对路径，
+   * 否则（区外 / 未打开文件夹）→ 绝对路径。
+   *
+   * 行号不并进 @ token（`@path:12-34` 无法被 dsh 解析成文件引用），而是作为
+   * 紧跟其后的纯文本提示，这样 @ 引用照旧可读文件，模型同时看到行号范围。
+   *
+   * `withLines` 仅在编辑器有选区（或显式要求）时取行号；资源管理器右键 /
+   * 无编辑器时恒为 false，只带路径。
+   */
+  const resolveInsertTarget = (
+    uri: vscode.Uri | undefined,
+    withLines: boolean,
+  ): { text: string } | null => {
     const editor = vscode.window.activeTextEditor;
     let filePath: string | null = null;
     let startLine = 0;
     let endLine = 0;
 
-    if (uri instanceof vscode.Uri) {
-      filePath = uri.fsPath;
-    } else if (editor !== undefined) {
+    if (withLines && editor !== undefined) {
       filePath = editor.document.uri.fsPath;
       startLine = editor.selection.start.line + 1;
       endLine = editor.selection.end.line + 1;
@@ -480,33 +496,65 @@ export function activate(context: vscode.ExtensionContext): void {
         editor.selection.isEmpty === false
       )
         endLine -= 1;
+    } else if (uri instanceof vscode.Uri) {
+      filePath = uri.fsPath;
+    } else if (editor !== undefined) {
+      filePath = editor.document.uri.fsPath;
     }
 
-    if (filePath === null) {
-      void vscode.window.showWarningMessage("dsh：没有可添加的文件");
-      return;
-    }
+    if (filePath === null) return null;
 
-    // 工作区内取相对路径，区外回落绝对路径（与 @ 引用的基准策略一致）。
-    const display = vscode.workspace
-      .asRelativePath(filePath)
-      .replace(/\\/gu, "/");
+    // dsh 启用的工作区内 → 相对路径；区外 → 绝对路径（统一正斜杠）。
+    const root = dshWorkspaceRoot();
+    const normalizedRoot = root === null ? null : root.replace(/\\/gu, "/");
+    const normalizedPath = filePath.replace(/\\/gu, "/");
+    const display =
+      normalizedRoot !== null &&
+      normalizedPath.toLowerCase().startsWith(
+        normalizedRoot.toLowerCase() + "/",
+      )
+        ? normalizedPath.slice(normalizedRoot.length + 1)
+        : normalizedPath;
+
     const lines =
       startLine === 0
         ? ""
         : startLine === endLine
           ? ` L${String(startLine)}`
           : ` L${String(startLine)}-${String(endLine)}`;
-    const text = `@${display}${lines}`;
+    return { text: `@${display}${lines}` };
+  };
 
+  /** 把解析结果聚焦面板并追加到当前会话草稿末尾。 */
+  const insertToComposer = async (
+    uri: vscode.Uri | undefined,
+    withLines: boolean,
+  ): Promise<void> => {
+    const target = resolveInsertTarget(uri, withLines);
+    if (target === null) {
+      void vscode.window.showWarningMessage("dsh：没有可添加的文件");
+      return;
+    }
     await vscode.commands.executeCommand("weinibuliu.dsh-vsc.focus");
     provider.post({
       type: "composerInsert",
       sessionId: provider.selectedSessionId,
-      text,
+      text: target.text,
     });
-    log(`[command] 添加到对话: ${text}`);
+    log(`[command] 添加到对话: ${target.text}`);
   };
+
+  // 编辑器右键：随选区自适应——有选区取「文件 + 行号」，无选区只取「文件」。
+  // 与 VS Code 自带聊天一致（Add File to Chat / Add Selection to Chat）。
+  const addFromEditor = async (uri?: vscode.Uri): Promise<void> => {
+    const editor = vscode.window.activeTextEditor;
+    const hasSelection = editor !== undefined && !editor.selection.isEmpty;
+    await insertToComposer(uri, hasSelection);
+  };
+
+  // 资源管理器右键：无行号概念，恒为「仅文件」。
+  const addFileToChat = async (uri?: vscode.Uri): Promise<void> =>
+    insertToComposer(uri, false);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("weinibuliu.dsh-vsc.focus", async () => {
@@ -514,7 +562,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand(
       "weinibuliu.dsh-vsc.addSelectionToChat",
-      addSelectionToChat,
+      addFromEditor,
+    ),
+    vscode.commands.registerCommand(
+      "weinibuliu.dsh-vsc.addFileToChat",
+      addFileToChat,
     ),
     vscode.commands.registerCommand(
       "weinibuliu.dsh-vsc.focus.from-editor",

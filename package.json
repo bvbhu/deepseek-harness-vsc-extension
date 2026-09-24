@@ -2,7 +2,7 @@
   "name": "dsh-vsc",
   "displayName": "DeepSeek Harness",
   "description": "DeepSeek Harness(dsh) for VS Code",
-  "version": "0.1.7",
+  "version": "0.1.17",
   "publisher": "bvbhu",
   "contributors": [
     { "name": "不留", "github": "weinibuliu" },
@@ -65,18 +65,31 @@
   {
    "when": "false",
    "command": "weinibuliu.dsh-vsc.focus.from-editor"
+  },
+  {
+   "when": "false",
+   "command": "weinibuliu.dsh-vsc.addSelectionToChat"
+  },
+  {
+   "when": "false",
+   "command": "weinibuliu.dsh-vsc.addFileToChat"
   }
  ],
  "editor/context": [
   {
    "command": "weinibuliu.dsh-vsc.addSelectionToChat",
-   "when": "editorTextFocus",
-   "group": "9_dsh"
+   "when": "editorTextFocus && editorHasSelection",
+   "group": "9_dsh@1"
+  },
+  {
+   "command": "weinibuliu.dsh-vsc.addFileToChat",
+   "when": "editorTextFocus && !editorHasSelection",
+   "group": "9_dsh@1"
   }
  ],
  "explorer/context": [
   {
-   "command": "weinibuliu.dsh-vsc.addSelectionToChat",
+   "command": "weinibuliu.dsh-vsc.addFileToChat",
    "when": "resourceScheme == file && !explorerResourceIsFolder",
    "group": "9_dsh"
   }
@@ -110,8 +123,11 @@
       },
       {
         "command": "weinibuliu.dsh-vsc.addSelectionToChat",
-        "title": "dsh: 添加到对话（文件 + 行号）",
-        "category": "DeepSeek Harness"
+        "title": "dsh: 将所选内容添加到对话"
+      },
+      {
+        "command": "weinibuliu.dsh-vsc.addFileToChat",
+        "title": "dsh: 将文件添加到对话"
       }
     ],
     "configuration": {

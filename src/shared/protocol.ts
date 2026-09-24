@@ -656,10 +656,17 @@ export interface PresetOptionView {
   description?: string;
 }
 
-/** permissions 会话投影整值（PermissionSelect）；custom 是派生态只显示不可选。 */
+/**
+ * permissions 会话投影整值（PermissionSelect）；custom 是派生态只显示不可选。
+ *
+ * dsh 0.1.7 的会话投影只含 `currentValue`（官方 `PermissionSelection` 接口
+ * 实锤），`options` 来自独立的 `permissionPresets/catalog` RPC。老网关可能
+ * 直接内联 `options`，故保留为可选字段；缺席时渲染方须回落空数组（不可
+ * 直接 `.filter`，否则 webview React 整树崩溃）。
+ */
 export interface PermissionSelectView {
-  /** 可切换预设（按表序）+ custom 仅在为当前值时追加。 */
-  options: PresetOptionView[];
+  /** 可切换预设（按表序）+ custom 仅在为当前值时追加；0.1.7 投影缺席。 */
+  options?: PresetOptionView[];
   /** 生效当前值：预设键，或 'custom'。 */
   currentValue: string;
 }

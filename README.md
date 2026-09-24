@@ -41,12 +41,9 @@ npx @deepseek-ai/dsh
 > [!NOTE]
 > 由于 DeepSeek Harness 有可能发生破坏性变更，本拓展或许仅能与特定版本的 dsh 一起运行。
 >
-> **测试 dsh 版本：`0.1.7-rc.1`**（自本拓展 `0.1.16` 起）。
+> **测试 dsh 版本：`0.1.7-rc.1`**（自本拓展 `0.1.17` 起）。
 >
-> 自 `0.1.16` 起已适配 Session 日志 V4（`0.1.7` 系列）：实时正文改由 `session/follow`
-> 的 `assistant-stream` 帧承载（需在 follow 请求中显式开启 `assistantStream`），
-> `tool/result` 结果改为顶层携带 `toolCallId` / `isError` 的一等消息，并新增
-> `assistant/attempt` 结算事件。旧版本（`0.1.2` ~ `0.1.6`）的日志与事件仍可正常回放。
+> 自 `0.1.17` 起已适配 Session 日志 V4（dsh `0.1.7` ）：旧版本（`0.1.2` ~ `0.1.6`）的日志与事件仍可正常回放。
 
 ## 开发
 

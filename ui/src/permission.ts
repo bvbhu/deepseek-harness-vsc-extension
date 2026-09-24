@@ -12,6 +12,11 @@ const PRESET_LABELS_ZH: Record<string, string> = {
   "read-only": "只读",
   [FULL_ACCESS_PRESET]: "完全访问",
   custom: "自定义",
+  // 0.1.7 部署预设：显示机器键（host 中文名太长/不直观）。
+  standard: "standard",
+  minimal: "minimal",
+  ptc: "ptc",
+  cordis: "cordis",
 };
 
 /** kebab-case 机器名 → title-case；非 kebab 名原样返回。 */

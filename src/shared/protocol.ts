@@ -305,7 +305,9 @@ export interface SessionSummary {
   cwd?: string;
   agentPreset?: string;
   /** Session-title projection cell when the deployment provides one. */
-  projections?: { values: { title?: string | null } };
+  projections?: {
+    values: { title?: string | null; agentPreset?: string | null };
+  };
 }
 
 /** One raw agentPreset.list roster row; broken rows remain projected. */

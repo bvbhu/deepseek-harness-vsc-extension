@@ -77,7 +77,7 @@ export function AgentPresetSelect({
   const deploymentDefault = value.presets.find((preset) => preset.isDefault)
   const currentId = value.staged ?? session?.agentPreset ?? deploymentDefault?.id ?? ''
   const current = value.presets.find((preset) => preset.id === currentId)
-  const currentLabel = current?.name ?? currentId
+  const currentLabel = current?.id ?? currentId
   const locked = session?.blank === false
   const boundUnknown = bound && session === undefined
   const hasIdentity = currentId !== ''
@@ -163,7 +163,7 @@ export function AgentPresetSelect({
             {options.map((option, optionIndex) => {
               const selected = option.id === currentId
               const optionLocked = locked && !selected
-              const label = option.name ?? option.id
+              const label = option.id
               return (
                 <button
                   key={option.id}

@@ -783,9 +783,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     void this.postFileIndex();
     if (!workspace) return;
     const visible = await this.sessions.listSessions(this._selectedSessionId);
+    const resolvedVisible: SessionSummary[] = [];
     for (const item of visible) {
       if (!item.blank) this.agentPresets.noteNonBlank(item.sessionId);
-      this.lastSessionItems.set(item.sessionId, item);
+      const existing = this.lastSessionItems.get(item.sessionId);
+      // 0.1.7：agentPreset 从 SessionSummary 顶层字段移为 session 投影
+      // （projections.values.agentPreset；见 dsh-agent-preset-registry/session）。
+      // 这里把它读回顶层，使 webview 的 AgentPresetSelect 与既有 session.agentPreset
+      // 读法兼容。优先保留事件/乐观更新设的值（应对刚选完、会话列表投影尚 stale
+      // 的竞态）；无事件时回落投影（冷启动）；再回落旧顶层字段（0.1.6 兼容）。
+      const resolved =
+        existing?.agentPreset ??
+        item.projections?.values?.agentPreset ??
+        item.agentPreset;
+      const merged = { ...item, agentPreset: resolved };
+      resolvedVisible.push(merged);
+      this.lastSessionItems.set(item.sessionId, merged);
       const current = this.activities.get(item.sessionId);
       this.activities.set(item.sessionId, {
         running: item.running,
@@ -799,7 +812,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           : { archivedActive: current.archivedActive }),
       });
     }
-    const items = [...visible];
+    const items = [...resolvedVisible];
     for (const [sessionId, activity] of this.activities) {
       if (
         !activity.archivedActive ||

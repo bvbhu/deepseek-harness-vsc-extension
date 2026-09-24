@@ -87,13 +87,6 @@ function buildFoldWithTransient(
   return fold;
 }
 
-/** 诊断：把事件列表压成 {类型: 计数}，用于比对话务端/客户端的事件集合。 */
-function histogram(events: WireSessionEvent[]): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const event of events) out[event.type] = (out[event.type] ?? 0) + 1;
-  return out;
-}
-
 /** source 以可读 record 呈现；否则 null（与 fold 内的同名助手同义）。 */
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -177,17 +170,13 @@ export class ConversationService extends EventEmitter {
     sessionId: string,
     block: ProjectionsBlock,
   ) => void;
-  /** 诊断：把折叠过程中的关键事实写进输出面板（V4 排障用）。 */
-  private readonly debug?: (line: string) => void;
 
   constructor(
     private readonly wire: () => WireClient | null,
     onProjections?: (sessionId: string, block: ProjectionsBlock) => void,
-    onDebug?: (line: string) => void,
   ) {
     super();
     this.onProjections = onProjections;
-    this.debug = onDebug;
   }
 
   /** The folded snapshot for a session, or null when not attached yet. */
@@ -292,13 +281,6 @@ export class ConversationService extends EventEmitter {
                 journal,
               };
               this.tracked.set(sessionId, tracked);
-              this.debug?.(
-                `[conv] session=${sessionId} 快照: records=${String(records.length)} ` +
-                  `events=${String(merged.length)} hasMore=${String(row.hasMore === true)} ` +
-                  `cursor=${String(row.cursor)} assistantStream=${String(row.assistantStream !== undefined)} ` +
-                  `synthetic=${String(synthetic.length)} items=${String(fold.snapshot().items.length)} ` +
-                  `types=${JSON.stringify(histogram(events))}`,
-              );
               // 快照已应用：清除 pending 缓冲。attach 入口曾将 sessionId 放入
               // pending 以缓冲快照前到达的实时帧；splice 清空后空数组仍为
               // truthy，applyLiveEvent 会把后续帧持续缓冲而不应用，导致对话
@@ -359,11 +341,6 @@ export class ConversationService extends EventEmitter {
       target.events = mergeEvents([events, target.events]);
       target.fold = buildFoldWithTransient(target.events, target.journal);
       target.hasMore = page.hasMore;
-      this.debug?.(
-        `[conv] session=${sessionId} loadOlder: page records=${String(page.records.length)} ` +
-          `events=${String(target.events.length)} items=${String(target.fold.snapshot().items.length)} ` +
-          `hasMore=${String(page.hasMore)}`,
-      );
       this.emit("change", sessionId);
       return this.snapshot(sessionId) as ConversationSnapshot;
     } finally {
@@ -380,9 +357,12 @@ export class ConversationService extends EventEmitter {
     const client = this.requireClient();
     await new Promise<void>((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined;
+      // 仅取快照的 projections 再立刻 dispose：不传 maxMessages（0.1.7 起
+      // `maxMessages` 必须为正整数，0 会被拒；省略则回落 host 默认 500，
+      // 但我们不等后续页就关流，故预算大小无所谓）。
       const dispose = client.openStream(
         "session/follow",
-        { request: { address: { kind: "session", sessionId }, maxMessages: 0 } },
+        { request: { address: { kind: "session", sessionId } } },
         {
           onItem: (value) => {
             const row = value as
@@ -481,9 +461,6 @@ export class ConversationService extends EventEmitter {
     const decision = tracked.journal.acceptFrame(frame);
     if (decision === null) return;
     if (decision.kind === "rebaseline") {
-      this.debug?.(
-        `[conv] session=${sessionId} assistant-stream ${String(frame.type)} REBASELINE -> 重连`,
-      );
       if (tracked.rebaselining === true) return;
       tracked.rebaselining = true;
       void this.attach(sessionId).catch(() => undefined);

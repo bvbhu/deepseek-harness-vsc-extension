@@ -165,9 +165,13 @@ export class CommandService {
     line: string,
   ): Promise<CommandExecutionResult | null> {
     const client = this.requireClient();
+    // 0.1.7（commands V2）：附件字段由 `images` 改为 `submittedAttachments`
+    // （`readonly CommandSubmitAttachment[]`）；描述符逐字段校验，传旧名会报
+    // `unexpected "images"` / `missing "submittedAttachments"`。空数组 = 纯命令调用，
+    // 对齐 dsh 参考实现 `commands.execute(sessionId, line, [])`。
     const value = await client.call<RawCommandExecution | undefined>(
       "commands/execute",
-      { agentId: sessionId, line, images: [] },
+      { agentId: sessionId, line, submittedAttachments: [] },
     );
     if (!value) return null;
     return {

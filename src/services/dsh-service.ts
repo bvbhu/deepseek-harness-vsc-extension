@@ -625,15 +625,10 @@ export class DshService extends EventEmitter {
       // 信号是 $events ready（见下方 onItem），成功握手后才归零。
       if (ready) this.setStatus("ready");
     });
-    mux.on("close", (code, reason) => {
+    mux.on("close", (code) => {
       if (generation !== this.generation || this.stopping) return;
       if (!ready) return; // handshake未完成：由 openGeneration 的失败路径处理
       const nextFailure = this.reconnectFailures + 1;
-      // streamCount 是排查 1008 的关键：它决定重连时会重提交多少 open 帧。
-      this.options.onLog?.(
-        `[mux] 连接断开 code=${String(code)} reason=${String(reason)}；` +
-          `重开流数=${String(mux.streamCount)}；连续失败=${String(nextFailure)}`,
-      );
       // onLog 只进输出面板，用户看不到；首断与逼近重启阈值时给出可见提示。
       if (nextFailure === 1) {
         this.options.onNotice?.(
@@ -648,17 +643,6 @@ export class DshService extends EventEmitter {
       this.emit("muxClose");
       this.setStatus("reconnecting");
       this.onPhysicalDrop();
-    });
-
-    // 诊断：把每个出帧记录下来。网关对非法帧/重复 streamId 一律回 1008 且不说明
-    // 原因，所以只有逐帧比对才能区分"形状不合法"与"streamId 撞车"。
-    mux.on("outgoing", (message: unknown) => {
-      const row = message as Record<string, unknown>;
-      this.options.onLog?.(
-        `[mux] 出帧 type=${String(row.type)} streamId=${String(
-          row.streamId,
-        )} endpoint=${String(row.endpoint ?? "")}`,
-      );
     });
 
     // ---- $events：host 事件 + waterfall + 握手 ready 帧 ----

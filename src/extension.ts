@@ -121,7 +121,6 @@ export function activate(context: vscode.ExtensionContext): void {
   const conversations = new ConversationService(
     () => dsh.client,
     (sessionId, block) => projections.seed(sessionId, block),
-    (line) => log(line),
   );
 
   // M4: pending 交互闭环（审批 / ask-user / plan-review）——帧→列表、应答/取消走

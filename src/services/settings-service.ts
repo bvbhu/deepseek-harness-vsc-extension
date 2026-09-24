@@ -215,37 +215,69 @@ export function hasPath(value: unknown, path: readonly string[]): boolean {
 
 /**
  * 解析 permission settings namespace 的 defaultPreset：当前值 + 可选预设枚举。
- * 枚举来自 schema 的 defaultPreset union（const 候选；`meta.description` = host 标签，
- * 缺席回落表键）。契约跟随——结构随用户 dsh 的 permission 单元契约变化。
+ * 0.1.7 起 defaultPreset schema 是纯字符串（volatile），不再公布 const 枚举；
+ * 可选项改由 permissionPresets/catalog 的 defaultOptions 提供（默认预设的合法
+ * 候选）。旧版（0.1.6-）schema 仍是 const union，从 schema 枚举。契约跟随——
+ * 结构随用户 dsh 的 permission 单元契约变化。
  */
-function permissionDefaultOf(
+function schemaPermissionOptions(
   view: SettingsNamespaceView,
-): Omit<PermissionDefaultView, "writable" | "revision"> {
-  const value = getPath(view.value, ["defaultPreset"]);
-  if (typeof value !== "string")
-    throw new Error("permission settings 缺少 defaultPreset 值");
+): { id: string; name: string }[] {
   const root = schemaRoot(view.schema);
-  if (root === undefined) throw new Error("permission settings schema 缺失");
+  if (root === undefined) return [];
   const refs = (view.schema as SchemaEnvelope).refs;
   const node = schemaNodeAt(root, ["defaultPreset"], refs);
-  if (node === undefined)
-    throw new Error("permission settings schema 无 defaultPreset 字段");
+  if (node === undefined) return [];
   const choices =
     node.type === "union"
       ? (node.list ?? [])
           .map((id) => refs[id])
           .filter((c): c is SchemaNodeDescriptor => c !== undefined)
       : [node];
-  const options = choices.flatMap((choice) => {
+  return choices.flatMap((choice) => {
     if (choice.type !== "const" || typeof choice.value !== "string") return [];
     const label = choice.meta?.description;
     const name =
       typeof label === "string" && label.length > 0 ? label : choice.value;
     return [{ id: choice.value, name }];
   });
-  if (options.length === 0 || !options.some((option) => option.id === value)) {
-    throw new Error("permission settings schema 未公布其当前预设");
+}
+
+/** 0.1.7：permissionPresets/catalog 的 defaultOptions（默认预设候选，进程级目录）。 */
+function catalogDefaultOptions(
+  value: unknown,
+): { id: string; name: string }[] {
+  if (typeof value !== "object" || value === null) return [];
+  const rec = value as Record<string, unknown>;
+  if (!Array.isArray(rec.defaultOptions)) return [];
+  const out: { id: string; name: string }[] = [];
+  for (const entry of rec.defaultOptions) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const item = entry as Record<string, unknown>;
+    if (typeof item.value !== "string") continue;
+    out.push({
+      id: item.value,
+      name: typeof item.name === "string" && item.name.length > 0 ? item.name : item.value,
+    });
   }
+  return out;
+}
+
+/**
+ * 当前 defaultPreset + 可选预设枚举。选项优先取 catalog（0.1.7），缺失时回落
+ * schema const union（0.1.6-）；两者都拿不到可选项才报错（行隐藏 + 日志）。
+ */
+function permissionDefaultOf(
+  view: SettingsNamespaceView,
+  catalogOptions: { id: string; name: string }[],
+): Omit<PermissionDefaultView, "writable" | "revision"> {
+  const value = getPath(view.value, ["defaultPreset"]);
+  if (typeof value !== "string")
+    throw new Error("permission settings 缺少 defaultPreset 值");
+  const options =
+    catalogOptions.length > 0 ? catalogOptions : schemaPermissionOptions(view);
+  if (options.length === 0)
+    throw new Error("permission settings schema 未公布其当前预设");
   return { currentValue: value, options };
 }
 
@@ -330,6 +362,23 @@ export class SettingsService {
   }
 
   /**
+   * 0.1.7：默认权限模式的候选预设来自 permissionPresets/catalog 的 defaultOptions
+   * （进程级目录，best-effort：失败回落空数组 → 回退旧 schema 枚举）。
+   */
+  private async permissionDefaultOptions(): Promise<
+    { id: string; name: string }[]
+  > {
+    const client = this.requireClient();
+    try {
+      return catalogDefaultOptions(
+        await client.call<unknown>("permissionPresets/catalog", {}),
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * 整页 join：llm.providers × settings.describe × credentials.describe（批量）。
    * describe/join 失败抛用户可读错误（面板显示 loadError）；凭据 enrich 失败
    * 不拖垮整页（行与 namespace 仍可用）。
@@ -385,7 +434,7 @@ export class SettingsService {
       try {
         permissionDefault = {
           writable: describe.writable,
-          ...permissionDefaultOf(permissionNs),
+          ...permissionDefaultOf(permissionNs, await this.permissionDefaultOptions()),
           revision: permissionNs.revision,
         };
       } catch (error) {
